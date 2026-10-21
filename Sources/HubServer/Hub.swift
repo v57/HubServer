@@ -321,7 +321,8 @@ final class Hub: @unchecked Sendable {
         case .done:
           stream.finish()
         case .failure(let failure):
-          stream.fail(failure.code == "disconnected" ? .cancelled : failure)
+          // The provider went away: callers can resubscribe (hub-server sends the same)
+          stream.fail(failure.code == "disconnected" ? ChannelFailure("service disconnected", code: "unavailable") : failure)
         }
         guard provider.running.removeValue(forKey: token) != nil else { return }
         group.completed(provider)
