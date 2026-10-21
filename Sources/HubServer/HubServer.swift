@@ -94,6 +94,13 @@ public final class HubServer: @unchecked Sendable {
     /// The current pairing code, when the hub has one (no owners yet, or `newPairingCode()`)
     public var pairingCode: PairingCode?
     public var local = false
+    public init() {}
+    init(state: State, hubKey: String? = nil, name: String? = nil, local: Bool) {
+      self.state = state
+      self.hubKey = hubKey
+      self.name = name
+      self.local = local
+    }
   }
 
   /// A connection to the hub, for showing who is connected
@@ -193,7 +200,7 @@ public final class HubServer: @unchecked Sendable {
       queue.async { [self] in
         hub?.stop()
         hub = nil
-        update { $0 = Status(hubKey: $0.hubKey, name: $0.name, local: configuration.local) }
+        update { $0 = Status(state: .stopped, hubKey: $0.hubKey, name: $0.name, local: configuration.local) }
         continuation.resume()
       }
     }
@@ -204,6 +211,7 @@ public final class HubServer: @unchecked Sendable {
     let hub = try await running()
     guard !configuration.local else { throw ChannelFailure("no pairing in local mode") }
     let code = hub.pairing.queue.sync { hub.pairing.create() }
+    update { $0.pairingCode = code }
     queue.async { hub.announce(code) }
     return code
   }
