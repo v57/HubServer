@@ -6,3 +6,7 @@ xcuserdata/
 DerivedData/
 /data
 node_modules/
+
+# Agents (local agent instructions and settings)
+CLAUDE.md
+/.claude
