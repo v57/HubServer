@@ -206,7 +206,7 @@ final class Hub: @unchecked Sendable {
 
   private func group(_ path: String) -> ServiceGroup {
     if let group = services[path] { return group }
-    let group = ServiceGroup(path: path)
+    let group = ServiceGroup(path: path, queue: queue)
     if let balancer = security.settings.balancer(path).flatMap(LoadBalancer.Kind.init(rawValue:)) { group.setBalancer(balancer) }
     services[path] = group
     serviceOrder.append(path)
@@ -236,16 +236,23 @@ final class Hub: @unchecked Sendable {
     return .object(object)
   }
 
-  /// Picks a provider for a call to a service path, now or once one is free
-  private func provider(for path: String, peer: ChannelPeer, context: JSON, _ use: @escaping (ServiceGroup, Provider?) -> Void) throws {
+  /// Picks a provider for a call to a service path, now or once one is free (hub-server 7461b70: waiting calls are
+  /// served oldest first and fail with `api not available` after 30 s). Returns what stops waiting, when it waits.
+  private func provider(for path: String, peer: ChannelPeer, context: JSON,
+    _ use: @escaping (ServiceGroup, Result<Provider, ChannelFailure>) -> Void) throws -> (() -> Void)? {
     guard let group = services[path] else { throw ChannelFailure.apiNotFound }
     let caller = self.caller(peer)
     guard security.allowsCall(caller, path, isPublic: group.isPublic) else { throw ChannelFailure("permissions required") }
     if let provider = try group.select(context) ?? group.next() {
-      use(group, provider)
-    } else {
-      group.wait(limit: security.settings.pendingLimit) { use(group, $0) }
+      use(group, .success(provider))
+      return nil
     }
+    let id = group.wait(limit: security.settings.pendingLimit, resolve: { provider in
+      group.claimed(provider)
+      use(group, .success(provider))
+    }, fail: { use(group, .failure($0)) })
+    live.changed(.status)
+    return { group.cancelWait(id) }
   }
 
   private var nextToken = 0
@@ -256,8 +263,12 @@ final class Hub: @unchecked Sendable {
 
   private func forward(_ call: IncomingCall) throws {
     let context = forwardedContext(call.context, caller(call.peer))
-    try provider(for: call.path, peer: call.peer, context: call.context) { [unowned self] group, provider in
-      guard let provider else { return call.fail(.apiNotFound) }
+    let stopWaiting = try provider(for: call.path, peer: call.peer, context: call.context) { [unowned self] group, result in
+      let provider: Provider
+      switch result {
+      case .success(let found): provider = found
+      case .failure(let failure): return call.fail(failure)
+      }
       guard !call.isCancelled, !call.isFinished else { return group.completed(provider) }
       group.requests += 1
       requests += 1
@@ -285,12 +296,17 @@ final class Hub: @unchecked Sendable {
         live.changed(.status)
       }
     }
+    if let stopWaiting { call.onCancel(stopWaiting) }
   }
 
   private func forward(_ stream: IncomingStream) throws {
     let context = forwardedContext(stream.context, caller(stream.peer))
-    try provider(for: stream.path, peer: stream.peer, context: stream.context) { [unowned self] group, provider in
-      guard let provider else { return stream.fail(.apiNotFound) }
+    let stopWaiting = try provider(for: stream.path, peer: stream.peer, context: stream.context) { [unowned self] group, result in
+      let provider: Provider
+      switch result {
+      case .success(let found): provider = found
+      case .failure(let failure): return stream.fail(failure)
+      }
       guard !stream.isFinished else { return group.completed(provider) }
       group.requests += 1
       requests += 1
@@ -322,6 +338,7 @@ final class Hub: @unchecked Sendable {
         live.changed(.status)
       }
     }
+    if let stopWaiting { stream.onCancel(stopWaiting) }
   }
 
   /// Connections providing a path

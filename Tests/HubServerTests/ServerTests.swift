@@ -9,6 +9,8 @@ final class TestClient: @unchecked Sendable {
   private var nextId = 0
   private var waiting: [Int: (JSON) -> Void] = [:]
   var handlers: [String: (JSON) -> JSON] = [:]
+  /// Handlers that answer later through the callback
+  var answering: [String: (JSON, @escaping (JSON) -> Void) -> Void] = [:]
   /// Contexts the handlers were called with
   var contexts: [JSON] = []
 
@@ -25,8 +27,12 @@ final class TestClient: @unchecked Sendable {
       guard let self, case .success(.string(let text)) = result, let message = try? JSON.parse(text) else { return }
       if let path = message["path"]?.string, let id = message["id"]?.int {
         lock.withLock { self.contexts.append(message["context"] ?? .null) }
-        let body = handlers[path]?(message["body"] ?? .null) ?? .null
-        send(["id": .int(id), "body": body])
+        if let handler = answering[path] {
+          handler(message["body"] ?? .null) { [self] body in self.send(["id": .int(id), "body": body]) }
+        } else {
+          let body = handlers[path]?(message["body"] ?? .null) ?? .null
+          send(["id": .int(id), "body": body])
+        }
       } else if let id = message["id"]?.int {
         let handler = lock.withLock { self.waiting[id] }
         handler?(message)
@@ -342,5 +348,173 @@ final class NetworkServerTests: XCTestCase {
     XCTAssertEqual(resources, [[]])
     await server.stop()
     for client in [owners, lost, other, user] { client.close() }
+  }
+}
+
+/// hub-server's test/pending.test.ts: calls that arrive before a provider is available
+final class PendingTests: XCTestCase {
+  var server: HubServer!
+  var port: UInt16 = 0
+  var hubKey = ""
+  var caller: TestClient!
+  var clients: [TestClient] = []
+  let helper = ServerTests()
+
+  override func setUp() async throws {
+    let owner = HubKeyPair()
+    var configuration = HubServer.Configuration(dataDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    configuration.listen = ListenAddress(host: "127.0.0.1", port: 0)
+    configuration.owners = [owner.publicKey]
+    configuration.log = { _ in }
+    server = HubServer(configuration)
+    port = try await server.start()
+    hubKey = server.status.hubKey!
+    caller = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
+    clients = [caller]
+  }
+
+  override func tearDown() async throws {
+    ServiceGroup.waitTimeout = 30
+    for client in clients { client.close() }
+    await server.stop()
+  }
+
+  /// A provider of `path`; hosting needs approval (`hub/host/update`) unless `approved`
+  func provider(_ path: String, approved: Bool = true, limit: Int? = nil, handler: @escaping (JSON) -> JSON = { $0 }) async throws -> (key: HubKeyPair, client: TestClient) {
+    let key = HubKeyPair()
+    let client = TestClient(port: port, headers: helper.auth(key, hubKey: hubKey))
+    clients.append(client)
+    client.handlers[path] = handler
+    var header: JSONObject = ["path": .string(path)]
+    if let limit { header["limit"] = .int(limit) }
+    _ = try await client.post("hub/service/update", ["services": [.object(header)]])
+    if approved { _ = try await caller.post("hub/host/update", ["key": .string(key.publicKey), "allow": [.string(path)]]) }
+    return (key, client)
+  }
+
+  /// How many calls of the path wait
+  func pending(_ path: String) async throws -> Int {
+    let status = try await caller.values("hub/status")
+    return status[0]["services"]?.array?.first { $0["name"]?.string == path }?["pending"]?.int ?? 0
+  }
+
+  func until(_ check: () async throws -> Bool, timeout: TimeInterval = 5) async throws {
+    let end = Date().addingTimeInterval(timeout)
+    while try await !check() {
+      guard Date() < end else { throw ChannelFailure("timed out") }
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+  }
+
+  /// Calls in this order: each one is on the wire before the next starts
+  func sendAll(_ path: String, _ bodies: [JSON]) async throws -> [Task<String, Never>] {
+    var calls: [Task<String, Never>] = []
+    for body in bodies {
+      calls.append(send(path, body))
+      try await Task.sleep(nanoseconds: 30_000_000)
+    }
+    return calls
+  }
+
+  func send(_ path: String, _ body: JSON, timeout: TimeInterval = 10) -> Task<String, Never> {
+    let caller = self.caller!
+    return Task {
+      do {
+        let result = try await caller.post(path, body, timeout: timeout)
+        return result?.string ?? result?.text ?? "nil"
+      } catch {
+        return "error: \(error)"
+      }
+    }
+  }
+
+  func testACallMadeBeforeHostingIsApprovedRunsOnceItIs() async throws {
+    let unapproved = try await provider("pending/approve", approved: false) { .string("echo \($0.text)") }
+    let calls = try await sendAll("pending/approve", (1...5).map { .int($0) })
+    try await until { try await self.pending("pending/approve") == 5 }
+    _ = try await caller.post("hub/host/update", ["key": .string(unapproved.key.publicKey), "allow": ["pending/approve"]])
+    var results: [String] = []
+    for call in calls { results.append(await call.value) }
+    XCTAssertEqual(results, ["echo 1", "echo 2", "echo 3", "echo 4", "echo 5"])
+    let waiting = try await pending("pending/approve")
+    XCTAssertEqual(waiting, 0)
+    let later = await send("pending/approve", 6).value
+    XCTAssertEqual(later, "echo 6")
+  }
+
+  func testACallMadeWhileNoProviderIsConnectedRunsWhenOneRegisters() async throws {
+    let first = try await provider("pending/late")
+    first.client.close()
+    try await until {
+      let status = try await self.caller.values("hub/status")
+      return status[0]["services"]?.array?.first { $0["name"]?.string == "pending/late" }?["services"]?.int == 0
+    }
+    let calls = try await sendAll("pending/late", ["a", "b", "c"])
+    try await until { try await self.pending("pending/late") == 3 }
+    _ = try await provider("pending/late") { .string(($0.string ?? "").uppercased()) }
+    var results: [String] = []
+    for call in calls { results.append(await call.value) }
+    XCTAssertEqual(results, ["A", "B", "C"])
+  }
+
+  func testWaitingCallsRespectTheProviderLimitAndRunInOrder() async throws {
+    let lock = NSLock()
+    var running = 0, most = 0
+    var order: [Int] = []
+    var release: [() -> Void] = []
+    let limited = try await provider("pending/limit", limit: 1)
+    limited.client.answering["pending/limit"] = { body, answer in
+      lock.withLock {
+        running += 1
+        most = max(most, running)
+        order.append(body.int ?? -1)
+        release.append {
+          lock.withLock { running -= 1 }
+          answer(body)
+        }
+      }
+    }
+    let calls = try await sendAll("pending/limit", (1...4).map { .int($0) })
+    for index in 0..<4 {
+      try await until { lock.withLock { release.count > index } }
+      try await Task.sleep(nanoseconds: 50_000_000)
+      XCTAssertEqual(lock.withLock { running }, 1)
+      lock.withLock { release[index] }()
+    }
+    var results: [String] = []
+    for call in calls { results.append(await call.value) }
+    XCTAssertEqual(results, ["1", "2", "3", "4"])
+    XCTAssertEqual(lock.withLock { order }, [1, 2, 3, 4])
+    XCTAssertEqual(lock.withLock { most }, 1)
+    // An idle provider serves a new call at once
+    let late = send("pending/limit", 5)
+    try await until { lock.withLock { release.count == 5 } }
+    lock.withLock { release[4] }()
+    let result = await late.value
+    XCTAssertEqual(result, "5")
+  }
+
+  func testAWaitingCallFailsWithApiNotAvailableAfterTheTimeout() async throws {
+    ServiceGroup.waitTimeout = 0.2
+    _ = try await provider("pending/timeout", approved: false)
+    let start = Date()
+    let result = await send("pending/timeout", 1).value
+    XCTAssertTrue(result.contains("api not available"), result)
+    XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.19)
+    let waiting = try await pending("pending/timeout")
+    XCTAssertEqual(waiting, 0)
+  }
+
+  func testPendingLimitFailsTheOldestWaitingCalls() async throws {
+    _ = try await caller.post("hub/balancer/limit", ["limit": 2])
+    let unapproved = try await provider("pending/evict", approved: false)
+    let calls = try await sendAll("pending/evict", (1...3).map { .int($0) })
+    try await until { try await self.pending("pending/evict") == 2 }
+    let oldest = await calls[0].value
+    XCTAssertTrue(oldest.contains("api not available"), oldest)
+    _ = try await caller.post("hub/host/update", ["key": .string(unapproved.key.publicKey), "allow": ["pending/evict"]])
+    var results: [String] = []
+    for call in calls.dropFirst() { results.append(await call.value) }
+    XCTAssertEqual(results, ["2", "3"])
   }
 }

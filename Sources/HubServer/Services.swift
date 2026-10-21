@@ -36,12 +36,16 @@ final class Provider {
   /// Requests and streams in flight, with what aborts each when the provider goes away
   var running: [Int: () -> Void] = [:]
   var limit = 0
+  /// Handed to waiting calls that haven't started yet; counts against `limit`
+  var reserved = 0
   init(connection: HubConnection, enabled: Bool) {
     self.connection = connection
     self.enabled = enabled
   }
   var load: Int { running.count }
-  var isLimited: Bool { limit > 0 && load >= limit }
+  var isLimited: Bool { limit > 0 && load + reserved >= limit }
+  /// Nothing running or about to
+  var isIdle: Bool { load == 0 && reserved == 0 }
 }
 
 /// Picks the provider of the next request
@@ -69,12 +73,12 @@ final class LoadBalancer {
       }
       return nil
     case .first:
-      return providers.first { $0.load == 0 && !$0.isLimited }
+      return providers.first { $0.isIdle && !$0.isLimited }
     case .available:
       let start = index + 1 >= providers.count ? 0 : index + 1
       for offset in 0..<providers.count {
         let candidate = (start + offset) % providers.count
-        if providers[candidate].load == 0 {
+        if providers[candidate].isIdle {
           index = candidate
           return providers[candidate]
         }
@@ -90,12 +94,31 @@ final class LoadBalancer {
 
 /// Everyone providing one path
 final class ServiceGroup {
+  /// How long a call waits for a provider before failing with `api not available`
+  static var waitTimeout: TimeInterval = 30
+  static let notAvailable = ChannelFailure("api not available")
+
+  /// A call waiting for a provider
+  private final class Waiter {
+    let id: Int
+    let resolve: (Provider) -> Void
+    let fail: (ChannelFailure) -> Void
+    var timer: DispatchWorkItem?
+    init(id: Int, resolve: @escaping (Provider) -> Void, fail: @escaping (ChannelFailure) -> Void) {
+      self.id = id
+      self.resolve = resolve
+      self.fail = fail
+    }
+  }
+
   let path: String
+  private let queue: DispatchQueue
   var requests = 0
   private(set) var providers: [Provider] = []
   private(set) var disabled: [Provider] = []
-  /// Requests waiting for a provider
-  private var pending: [(Provider?) -> Void] = []
+  /// Calls waiting for a provider, oldest first
+  private var pending: [Waiter] = []
+  private var nextWaiter = 0
   /// Connections whose header marked the path `public`
   private var publicConnections = Set<ObjectIdentifier>()
   private(set) var balancer = LoadBalancer(.counter)
@@ -103,8 +126,9 @@ final class ServiceGroup {
   /// Has providers, so the path is in the hub's API
   private(set) var isEnabled = false
 
-  init(path: String) {
+  init(path: String, queue: DispatchQueue) {
     self.path = path
+    self.queue = queue
   }
 
   /// Adds a provider. Returns true when the path became available.
@@ -114,7 +138,7 @@ final class ServiceGroup {
       guard !providers.contains(where: { $0.connection === provider.connection }) else { return false }
       providers.append(provider)
       let enabled = enable()
-      if !pending.isEmpty, let next = balancer.next(providers) { pending.removeFirst()(next) }
+      drain()
       return enabled
     } else {
       if !disabled.contains(where: { $0.connection === provider.connection }) { disabled.append(provider) }
@@ -180,7 +204,10 @@ final class ServiceGroup {
     isEnabled = false
     let pending = self.pending
     self.pending = []
-    for waiter in pending { waiter(nil) }
+    for waiter in pending {
+      waiter.timer?.cancel()
+      waiter.fail(.apiNotFound)
+    }
     return true
   }
 
@@ -202,6 +229,7 @@ final class ServiceGroup {
       if !balancer.kind.allowsLimit { balancer = LoadBalancer(.counter) }
     }
     (providers + disabled).first { $0.connection === connection }?.limit = limit
+    drain()
   }
 
   func setBalancer(_ kind: LoadBalancer.Kind) {
@@ -224,29 +252,63 @@ final class ServiceGroup {
     return onDevice.reduce(first) { $1.load < $0.load ? $1 : $0 }
   }
 
-  /// The next provider, nil when requests are waiting or every provider is busy
+  /// A provider for a new call. Older waiting calls are served first; a provider left over goes to this one.
   func next() -> Provider? {
+    drain()
     guard pending.isEmpty else { return nil }
     return balancer.next(providers)
   }
 
-  /// Waits for a provider. With a positive `limit`, the oldest waiting requests are dropped beyond it.
-  func wait(limit: Int, _ waiter: @escaping (Provider?) -> Void) {
-    if limit > 0 {
-      let drop = pending.count + 1 - limit
-      if drop > 0 {
-        let dropped = pending.prefix(drop)
-        pending.removeFirst(drop)
-        for waiter in dropped { waiter(nil) }
+  /// Waits for a provider; `next()` had none. Fails with `api not available` after `waitTimeout`, or when a positive
+  /// `limit` of newer waiting calls pushes it out. The caller passes the provider it gets to `claimed`. Returns the
+  /// waiter's id, for `cancelWait`.
+  @discardableResult
+  func wait(limit: Int, resolve: @escaping (Provider) -> Void, fail: @escaping (ChannelFailure) -> Void) -> Int {
+    nextWaiter += 1
+    let waiter = Waiter(id: nextWaiter, resolve: resolve, fail: fail)
+    let timer = DispatchWorkItem { [weak self, weak waiter] in
+      guard let self, let waiter, let index = self.pending.firstIndex(where: { $0 === waiter }) else { return }
+      self.pending.remove(at: index)
+      waiter.fail(ServiceGroup.notAvailable)
+    }
+    waiter.timer = timer
+    queue.asyncAfter(deadline: .now() + ServiceGroup.waitTimeout, execute: timer)
+    pending.append(waiter)
+    if limit > 0, pending.count > limit {
+      let evicted = pending.prefix(pending.count - limit)
+      pending.removeFirst(evicted.count)
+      for old in evicted {
+        old.timer?.cancel()
+        old.fail(ServiceGroup.notAvailable)
       }
     }
-    pending.append(waiter)
+    return waiter.id
   }
 
-  /// A request finished: the provider goes to the next waiting request
+  /// The waiting call was cancelled
+  func cancelWait(_ id: Int) {
+    guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
+    pending.remove(at: index).timer?.cancel()
+  }
+
+  /// Hands free providers to waiting calls, oldest first, reserving each until its call starts
+  private func drain() {
+    while !pending.isEmpty, let provider = balancer.next(providers) {
+      let waiter = pending.removeFirst()
+      waiter.timer?.cancel()
+      provider.reserved += 1
+      waiter.resolve(provider)
+    }
+  }
+
+  /// A waiting call got `provider` and starts now
+  func claimed(_ provider: Provider) {
+    if provider.reserved > 0 { provider.reserved -= 1 }
+  }
+
+  /// A call ended, so its provider may take a waiting one
   func completed(_ provider: Provider) {
-    guard !pending.isEmpty, provider.enabled, providers.contains(where: { $0 === provider }) else { return }
-    pending.removeFirst()(provider)
+    drain()
   }
 
   var status: JSON {
