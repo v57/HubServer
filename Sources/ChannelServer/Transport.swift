@@ -55,6 +55,8 @@ public protocol ChannelTransport: AnyObject {
   func start(queue: DispatchQueue, accept: @escaping UpgradeHandler, ready: @escaping (Result<UInt16, Error>) -> Void)
   /// Stops listening and closes every connection
   func stop()
+  /// Called when listening fails after `ready` reported success (the network went away, the app was suspended)
+  var onFailure: ((Error) -> Void)? { get set }
 }
 
 /// A TCP connection
@@ -71,6 +73,8 @@ public protocol ByteStream: AnyObject {
 public protocol ByteStreamListener: AnyObject {
   func start(queue: DispatchQueue, ready: @escaping (Result<UInt16, Error>) -> Void, accept: @escaping (ByteStream) -> Void)
   func stop()
+  /// Called when listening fails after `ready` reported success
+  var onFailure: ((Error) -> Void)? { get set }
 }
 
 /// Where to listen: a port on every interface, or one address

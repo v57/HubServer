@@ -1,12 +1,16 @@
 import ChannelServer
 import Foundation
 
-/// A pairing code for the first owner (protocol.md section 12)
-public struct PairingCode: Sendable, Equatable {
-  /// `K7Q-2MX`
-  public var code: String
-  public var expires: Date
+extension HubServer {
+  /// A pairing code for the first owner (protocol.md section 12)
+  public struct PairingCode: Sendable, Equatable {
+    /// `K7Q-2MX`
+    public var code: String
+    public var expires: Date
+  }
 }
+/// Nested in `HubServer`, since HubService has its own `PairingCode`
+typealias PairingCode = HubServer.PairingCode
 
 /// Pairing codes: 6 Crockford base32 symbols, valid for an hour and one success. Only `scrypt(code, salt)` is kept
 /// in `pairing.json`; the plain code goes to `pairing-code` for the launcher, both 0600. The files match hub-server's,

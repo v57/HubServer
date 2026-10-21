@@ -87,11 +87,29 @@ public final class HubServer: @unchecked Sendable {
     /// The hub's display name
     public var name: String?
     public var connections = 0
+    /// Who is connected, oldest first
+    public var peers: [Peer] = []
     /// Owners stored in the owners group (keys and devices)
     public var owners = 0
     /// The current pairing code, when the hub has one (no owners yet, or `newPairingCode()`)
     public var pairingCode: PairingCode?
     public var local = false
+  }
+
+  /// A connection to the hub, for showing who is connected
+  public struct Peer: Sendable, Equatable, Identifiable {
+    /// Connection id
+    public var id: String
+    /// The name its profile gives
+    public var name: String?
+    /// Its device's name, when the connection is device-attached
+    public var device: String?
+    /// Its key (SPKI), `nil` for anonymous connections
+    public var key: String?
+    /// IP address it connects from
+    public var address: String?
+    /// Paths it provides
+    public var services: Int
   }
 
   public let configuration: Configuration
@@ -142,7 +160,15 @@ public final class HubServer: @unchecked Sendable {
         hub.onChange = { [weak self] in self?.scheduleStatus() }
         var address = configuration.listen
         if configuration.local { address.host = "127.0.0.1" }
-        hub.start(transport: makeTransport(address)) { [self] result in
+        let transport = makeTransport(address)
+        transport.onFailure = { [weak self, weak hub] error in
+          guard let self, let hub, self.hub === hub else { return }
+          configuration.log("Hub stopped listening: \(error)")
+          hub.stop()
+          self.hub = nil
+          update { $0.state = .failed("\(error)") }
+        }
+        hub.start(transport: transport) { [self] result in
           switch result {
           case .success(let port):
             update { $0.port = port }
@@ -245,6 +271,10 @@ public final class HubServer: @unchecked Sendable {
       status.hubKey = hub.hubKey
       status.name = hub.name
       status.connections = hub.connections.count
+      status.peers = hub.connections.map { connection in
+        Peer(id: connection.id, name: connection.name, device: connection.device.flatMap { hub.registry.device($0)?.name },
+          key: connection.key, address: connection.ip, services: connection.services.count)
+      }
       status.owners = hub.security.members.members(ownersGroup).count
       status.pairingCode = pairingCode
     }

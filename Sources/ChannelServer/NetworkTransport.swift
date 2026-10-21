@@ -5,6 +5,7 @@ import Network
 /// TCP with Network.framework
 public final class NetworkStreamListener: ByteStreamListener {
   public let address: ListenAddress
+  public var onFailure: ((Error) -> Void)?
   private var listener: NWListener?
   private var streams: [ObjectIdentifier: NetworkStream] = [:]
 
@@ -43,6 +44,8 @@ public final class NetworkStreamListener: ByteStreamListener {
         if !reported {
           reported = true
           ready(.failure(error))
+        } else {
+          self?.onFailure?(error)
         }
       case .waiting(let error):
         // The port is taken or the network isn't up: report it instead of waiting forever

@@ -11,6 +11,10 @@ public final class WebSocketServer: ChannelTransport {
   }
   private let listener: ByteStreamListener
   private let options: Options
+  public var onFailure: ((Error) -> Void)? {
+    get { listener.onFailure }
+    set { listener.onFailure = newValue }
+  }
   private var connections: [ObjectIdentifier: WebSocketConnection] = [:]
   private var timer: DispatchSourceTimer?
   private var queue: DispatchQueue?
