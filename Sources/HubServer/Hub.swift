@@ -242,7 +242,7 @@ final class Hub: @unchecked Sendable {
     _ use: @escaping (ServiceGroup, Result<Provider, ChannelFailure>) -> Void) throws -> (() -> Void)? {
     guard let group = services[path] else { throw ChannelFailure.apiNotFound }
     let caller = self.caller(peer)
-    guard security.allowsCall(caller, path, isPublic: group.isPublic) else { throw ChannelFailure("permissions required") }
+    guard security.allowsCall(caller, path, isPublic: group.isPublic) else { throw ChannelFailure.forbidden }
     if let provider = try group.select(context) ?? group.next() {
       use(group, .success(provider))
       return nil
@@ -644,7 +644,41 @@ final class Hub: @unchecked Sendable {
     if let remove = body?["remove"]?.strings { removeServices(connection, remove) }
     if let add = body?["addApps"]?.array { apps.add(connection, add) }
     if let remove = body?["removeApps"]?.strings { apps.remove(connection, remove) }
+    if case .bool(let draining)? = body?["draining"] { setDraining(connection, draining) }
     connectionsChanged()
+  }
+
+  /// `hub/service/update { draining }`: while draining, the connection's paths take no new calls and its running
+  /// calls go on. A path whose last provider drains leaves the API; calls to it wait for another provider.
+  private func setDraining(_ connection: HubConnection, _ draining: Bool) {
+    connection.draining = draining
+    for path in connection.services {
+      guard let group = services[path] else { continue }
+      group.setDraining(connection, draining)
+      if group.isEnabled { api.insert(path) } else { api.remove(path) }
+    }
+  }
+
+  /// `hub/grant/check { path, caller }` → `{ allowed }`: whether `path` is granted to `caller` (a request's
+  /// `context.hub.caller`, or `{ key?, device? }`). Owners always are; grants count unless the hub is locked down.
+  /// Services ask about paths under the first segment of a path they registered, owners about any path.
+  private func checkGrant(_ peer: ChannelPeer, _ body: JSON?) throws -> JSON {
+    guard let path = body?["path"]?.string, !path.isEmpty else { throw ChannelFailure("invalid path", code: "invalid_input") }
+    let connection = connection(peer)
+    if !caller(peer).owner {
+      let scope = path.split(separator: "/", omittingEmptySubsequences: false).first.map(String.init) ?? path
+      let hosted = connection.services.contains { ($0.split(separator: "/", omittingEmptySubsequences: false).first.map(String.init) ?? $0) == scope }
+      guard hosted else { throw ChannelFailure.forbidden }
+    }
+    let subject = body?["caller"]
+    let device = subject?["device"]?.string ?? subject?["device"]?["id"]?.string
+    var caller = security.caller(Principal(key: subject?["key"]?.string, device: device))
+    // A caller through a merged hub is never an owner here, as when its call was forwarded
+    if let via = subject?["via"], !via.isNull {
+      caller.groups.removeAll { $0 == ownersGroup }
+      caller.owner = false
+    }
+    return ["allowed": .bool(caller.owner || (!security.lockdown && security.grants.allowsPath(caller, path)))]
   }
 
   private var connectionsJSON: JSON {
@@ -688,6 +722,7 @@ final class Hub: @unchecked Sendable {
       }
       .stream("hub/grants") { [unowned self] call in try stream(call, .grants) { [unowned self] in .array(security.grants.grants.map(\.json)) } }
       .post("hub/grant/add") { [unowned self] call in try security.addGrant(call.body, by: caller(call.peer)).json }
+      .post("hub/grant/check") { [unowned self] call in try checkGrant(call.peer, call.body) }
       .post("hub/grant/remove") { [unowned self] call in
         guard security.grants.remove(id: call.body?["id"]?.string) != nil else { throw ChannelFailure("grant not found") }
         return nil

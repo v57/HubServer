@@ -20,6 +20,8 @@ final class HubConnection {
   /// A valid certificate, also from a pending device
   var certificate: Certificate?
   var isOpen = false
+  /// Its paths take no new calls (`hub/service/update { draining: true }`); running calls go on
+  var draining = false
 
   init(key: String?, ip: String?) {
     self.id = newId()
@@ -38,9 +40,12 @@ final class Provider {
   var limit = 0
   /// Handed to waiting calls that haven't started yet; counts against `limit`
   var reserved = 0
+  /// Takes no new calls, see `ServiceGroup.setDraining`
+  var draining: Bool
   init(connection: HubConnection, enabled: Bool) {
     self.connection = connection
     self.enabled = enabled
+    self.draining = connection.draining
   }
   var load: Int { running.count }
   var isLimited: Bool { limit > 0 && load + reserved >= limit }
@@ -96,7 +101,7 @@ final class LoadBalancer {
 final class ServiceGroup {
   /// How long a call waits for a provider before failing with `api not available`
   static var waitTimeout: TimeInterval = 30
-  static let notAvailable = ChannelFailure("api not available")
+  static let notAvailable = ChannelFailure("api not available", code: "unavailable")
 
   /// A call waiting for a provider
   private final class Waiter {
@@ -116,6 +121,8 @@ final class ServiceGroup {
   var requests = 0
   private(set) var providers: [Provider] = []
   private(set) var disabled: [Provider] = []
+  /// Enabled providers that take no new calls; their running calls go on
+  private(set) var draining: [Provider] = []
   /// Calls waiting for a provider, oldest first
   private var pending: [Waiter] = []
   private var nextWaiter = 0
@@ -134,7 +141,10 @@ final class ServiceGroup {
   /// Adds a provider. Returns true when the path became available.
   @discardableResult
   func add(_ provider: Provider) -> Bool {
-    if provider.enabled {
+    if provider.enabled, provider.draining {
+      if !draining.contains(where: { $0.connection === provider.connection }) { draining.append(provider) }
+      return false
+    } else if provider.enabled {
       guard !providers.contains(where: { $0.connection === provider.connection }) else { return false }
       providers.append(provider)
       let enabled = enable()
@@ -151,6 +161,10 @@ final class ServiceGroup {
   func remove(_ connection: HubConnection) -> Bool {
     publicConnections.remove(ObjectIdentifier(connection))
     disabled.removeAll { $0.connection === connection }
+    if let index = draining.firstIndex(where: { $0.connection === connection }) {
+      abort(draining.remove(at: index))
+      return false
+    }
     guard let index = providers.firstIndex(where: { $0.connection === connection }) else { return false }
     let provider = providers.remove(at: index)
     balancer.removed(at: index)
@@ -173,8 +187,15 @@ final class ServiceGroup {
 
   /// An owner revoked the key's hosting: its providers stop, their requests are aborted
   func revokeKey(_ key: String) -> (count: Int, disabled: Bool) {
+    let drained = draining.filter { $0.connection.key == key }
+    draining.removeAll { $0.connection.key == key }
+    for provider in drained {
+      provider.enabled = false
+      disabled.append(provider)
+      abort(provider)
+    }
     let revoked = providers.filter { $0.connection.key == key }
-    guard !revoked.isEmpty else { return (0, false) }
+    guard !revoked.isEmpty else { return (drained.count, false) }
     for provider in revoked {
       if let index = providers.firstIndex(where: { $0 === provider }) {
         providers.remove(at: index)
@@ -184,7 +205,29 @@ final class ServiceGroup {
       disabled.append(provider)
       abort(provider)
     }
-    return (revoked.count, disable())
+    return (revoked.count + drained.count, disable())
+  }
+
+  /// Moves the connection's provider out of or back into load balancing, keeping its running calls. A path whose
+  /// last provider drains becomes unavailable (`isEnabled` false) and calls to it keep waiting for another provider.
+  func setDraining(_ connection: HubConnection, _ value: Bool) {
+    if let provider = disabled.first(where: { $0.connection === connection }) {
+      provider.draining = value
+      return
+    }
+    if value {
+      guard let index = providers.firstIndex(where: { $0.connection === connection }) else { return }
+      let provider = providers.remove(at: index)
+      balancer.removed(at: index)
+      provider.draining = true
+      draining.append(provider)
+      if isEnabled, providers.isEmpty { isEnabled = false }
+    } else {
+      guard let index = draining.firstIndex(where: { $0.connection === connection }) else { return }
+      let provider = draining.remove(at: index)
+      provider.draining = false
+      _ = add(provider)
+    }
   }
 
   private func abort(_ provider: Provider) {
@@ -220,7 +263,7 @@ final class ServiceGroup {
   }
   /// Callable by anyone in `default-deny`: an enabled provider marked the path public
   var isPublic: Bool {
-    providers.contains { publicConnections.contains(ObjectIdentifier($0.connection)) }
+    (providers + draining).contains { publicConnections.contains(ObjectIdentifier($0.connection)) }
   }
 
   func setLimit(_ connection: HubConnection, _ limit: Int) {
@@ -228,7 +271,7 @@ final class ServiceGroup {
       limited = true
       if !balancer.kind.allowsLimit { balancer = LoadBalancer(.counter) }
     }
-    (providers + disabled).first { $0.connection === connection }?.limit = limit
+    (providers + disabled + draining).first { $0.connection === connection }?.limit = limit
     drain()
   }
 
@@ -312,9 +355,13 @@ final class ServiceGroup {
   }
 
   var status: JSON {
-    ["name": .string(path), "services": .int(providers.count), "disabled": .int(disabled.count), "requests": .int(requests),
-     "balancer": .string(balancer.kind.rawValue), "pending": .int(pending.count),
-     "running": .int(providers.reduce(0) { $0 + $1.load })]
+    var object: JSONObject = [
+      "name": .string(path), "services": .int(providers.count), "disabled": .int(disabled.count), "requests": .int(requests),
+      "balancer": .string(balancer.kind.rawValue), "pending": .int(pending.count),
+      "running": .int((providers + draining).reduce(0) { $0 + $1.load }),
+    ]
+    if !draining.isEmpty { object["draining"] = .int(draining.count) }
+    return .object(object)
   }
 }
 

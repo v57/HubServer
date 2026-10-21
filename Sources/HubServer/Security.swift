@@ -19,7 +19,7 @@ private let publicBuiltins: Set<String> = [
 ]
 // `hub/net/bind` keeps the proof of its bind kind, `hub/net/node` tells agents where their node is, `hub/pair`
 // takes any keyed caller (section 12)
-private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair"]
+private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check"]
 private let reporterBuiltins: Set<String> = ["hub/device/describe", "hub/device/data"]
 private let grantBuiltins: Set<String> = ["hub/devices", "hub/devices/data"]
 
@@ -77,6 +77,14 @@ struct Caller {
     object["owner"] = .bool(owner)
     return .object(object)
   }
+}
+
+/// Hub errors with a code (protocol.md section 11); the message stays the string older clients compare
+extension ChannelFailure {
+  /// No key (anonymous caller) where one is needed
+  static let unauthorized = ChannelFailure("unauthorized", code: "unauthorized")
+  /// The caller may not call this path
+  static let forbidden = ChannelFailure("permissions required", code: "forbidden")
 }
 
 // MARK: - Grants
@@ -704,13 +712,13 @@ final class Security {
       // Reporter handlers check that the caller is its device's reporter
       return
     case .auth:
-      if caller.key == nil { throw ChannelFailure("unauthorized") }
+      if caller.key == nil { throw ChannelFailure.unauthorized }
     case .grant:
       // Approved devices are members and read the directory of their hub; others need a grant
       if caller.owner || (!lockdown && (caller.device != nil || grants.allowsPath(caller, path))) { return }
-      throw ChannelFailure("permissions required")
+      throw ChannelFailure.forbidden
     case .owner:
-      if !caller.owner { throw ChannelFailure("permissions required") }
+      if !caller.owner { throw ChannelFailure.forbidden }
     }
   }
 

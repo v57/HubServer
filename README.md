@@ -83,9 +83,11 @@ protocol.md sections 1–12:
 - service registration (`hub/service/update` with `services`, `add/remove`, `apps`, `public`, `limit`,
   `permissions`, `reporter`), hosting approval (`hub/host/*`), routing of posts and streams with cancel,
   `context.service` and `context.device` selection, the `counter`, `random`, `first` and `available` balancers,
-  waiting requests and `hub/balancer/limit`
+  waiting requests and `hub/balancer/limit`, draining (`hub/service/update { draining }`: no new calls, running ones
+  finish)
 - `default-deny`/`default-allow` with every built-in API classified, grants (`hub/grant*`, the old `hub/call/*`
-  on top of them), groups (`hub/group/*`, `hub/groups`, several groups per member, person groups, `owners`)
+  on top of them, `hub/grant/check` for services' own permissions), error codes (`unauthorized`, `forbidden`,
+  `not_found`, `unavailable`), groups (`hub/group/*`, `hub/groups`, several groups per member, person groups, `owners`)
 - device certificates, `devices.json`, pending devices with safety codes, approve, rename, remove, revoke (with
   tombstones and revoked keys), the reporter role, `hub/device/describe` (with signed SSH host keys) and live data
 - `hub/api`, `hub/api/services`, `hub/status`, `hub/status/badges`, `hub/connections`, `hub/header`,
