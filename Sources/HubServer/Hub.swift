@@ -249,7 +249,7 @@ final class Hub: @unchecked Sendable {
       requests += 1
       live.changed(.status)
       let token = self.token()
-      let peer = provider.connection.peer!
+      guard let peer = provider.connection.peer else { return call.fail(.cancelled) }
       let id = peer.request(call.path, body: call.body, context: context) { [unowned self] result in
         guard provider.running.removeValue(forKey: token) != nil else { return }
         switch result {
@@ -282,7 +282,7 @@ final class Hub: @unchecked Sendable {
       requests += 1
       live.changed(.status)
       let token = self.token()
-      let peer = provider.connection.peer!
+      guard let peer = provider.connection.peer else { return stream.fail(.cancelled) }
       let id = peer.stream(stream.path, body: stream.body, context: context) { [unowned self] event in
         switch event {
         case .value(let value):
@@ -386,7 +386,7 @@ final class Hub: @unchecked Sendable {
     liveData[id] = nil
     let revoked = Set(revokedKeys)
     for connection in connections where connection.certificate?.deviceId == id || connection.key.map(revoked.contains) == true {
-      connection.peer.close()
+      connection.peer?.close()
     }
     security.removeDevice(id)
     for key in revokedKeys { security.revokeKey(key) }
@@ -740,7 +740,7 @@ final class Hub: @unchecked Sendable {
         if whitelist.enabled {
           for connection in connections {
             guard let key = connection.key, security.isOwner(Principal(key: key)) || whitelist.contains(key) else {
-              connection.peer.close()
+              connection.peer?.close()
               continue
             }
           }

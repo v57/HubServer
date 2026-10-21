@@ -4,8 +4,8 @@ import Foundation
 /// One connection to the hub
 final class HubConnection {
   let id: String
-  /// Set once the WebSocket is open
-  var peer: ChannelPeer!
+  /// Set once the WebSocket is open. Weak: the peer holds the connection as its state.
+  weak var peer: ChannelPeer?
   let key: String?
   var name: String?
   var icon: JSON?
