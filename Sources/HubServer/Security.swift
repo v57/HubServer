@@ -158,7 +158,8 @@ final class GrantStore {
   private(set) var grants: [Grant] = []
   var migrated: [String] = []
   let store: JSONStore
-  var onChange: () -> Void = {}
+  /// Grants added or removed
+  var onChange: ([Grant]) -> Void = { _ in }
 
   init(storage: Storage) {
     store = storage.store("grants.json")
@@ -182,30 +183,31 @@ final class GrantStore {
     if let existing = grants.first(where: { $0.subject == subject && $0.object == object }) { return existing }
     let grant = Grant(id: newId(), subject: subject, object: object, by: by, at: isoNow())
     grants.append(grant)
-    changed()
+    changed([grant])
     return grant
   }
   func remove(id: String?) -> Grant? {
     guard let index = grants.firstIndex(where: { $0.id == id }) else { return nil }
     let grant = grants.remove(at: index)
-    changed()
+    changed([grant])
     return grant
   }
   @discardableResult
   func removeAll(where match: (Grant) -> Bool) -> Int {
-    let count = grants.count
+    let removed = grants.filter(match)
+    guard !removed.isEmpty else { return 0 }
     grants.removeAll(where: match)
-    if grants.count != count { changed() }
-    return count - grants.count
+    changed(removed)
+    return removed.count
   }
   /// Replaces the subject of matching grants, keeping their ids (group renames)
   func rename(_ from: GrantSubject, to: GrantSubject) {
-    var changes = 0
+    var renamed: [Grant] = []
     for index in grants.indices where grants[index].subject == from {
       grants[index].subject = to
-      changes += 1
+      renamed.append(grants[index])
     }
-    if changes > 0 { changed() }
+    if !renamed.isEmpty { changed(renamed) }
   }
   func allowsPath(_ caller: Caller, _ path: String) -> Bool {
     grants.contains { grant in
@@ -224,9 +226,12 @@ final class GrantStore {
     }
     return result
   }
-  private func changed() {
+  func allowsShare(_ caller: Caller, _ share: String) -> Bool {
+    grants.contains { $0.object == .share(share) && $0.subject.matches(caller) }
+  }
+  private func changed(_ grants: [Grant]) {
     store.save()
-    onChange()
+    onChange(grants)
   }
 }
 
@@ -416,6 +421,10 @@ final class PathNames {
     for (path, name) in hubApiNames { names[path] = .string(name) }
   }
   func contains(_ path: String) -> Bool { names.contains(path) }
+  /// A built-in API's name, not stored
+  func register(_ path: String, name: String) {
+    names[path] = .string(name)
+  }
   func add(_ path: String, name: String) {
     guard names[path] != .string(name) else { return }
     names[path] = .string(name)

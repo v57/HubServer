@@ -5,11 +5,12 @@ import Foundation
 enum LiveTopic: Hashable {
   case status, badges, connections, devices, pending, deviceData(String), api, providers, security, grants, groups
   case hostPending, callPending, whitelist, header
+  case network, networkGenerations, networkRevoked, netNode, netList
 
   /// Changes within this many seconds are sent together
   var delay: TimeInterval {
     switch self {
-    case .connections: 0.5
+    case .connections, .netList: 0.5
     case .devices: 0.1
     default: 0.03
     }

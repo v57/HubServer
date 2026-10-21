@@ -30,6 +30,10 @@ final class Hub: @unchecked Sendable {
   private var liveData: [String: JSON] = [:]
   private let headerStore: JSONStore
   private(set) var name: String
+  let network: NetworkAPI
+  let netNode: NetNodeStore
+  /// `hub/net/test/complete` results, in memory
+  var testResults: [String: JSON] = [:]
   var onChange: () -> Void = {}
 
   var hubKey: String { security.hubKey }
@@ -49,6 +53,8 @@ final class Hub: @unchecked Sendable {
     registry = DeviceRegistry(storage: storage)
     pairing = Pairing(directory: configuration.dataDirectory, log: log)
     live = LiveValues(queue: queue)
+    network = NetworkAPI(storage: storage, security: security, key: key, queue: queue)
+    netNode = NetNodeStore(storage: storage)
     headerStore = storage.store("header.json")
     name = configuration.name ?? HubServer.Configuration.hostName
 
@@ -69,7 +75,12 @@ final class Hub: @unchecked Sendable {
       headerStore.writeNow()
     }
     security.deviceName = { [unowned self] id in registry.device(id)?.name }
+    network.localAgentEndpoint = configuration.localAgentEndpoint ?? LocalAgent.defaultEndpoint
+    network.load()
+    netNode.load()
+    for (path, name) in networkAPINames { security.names.register(path, name: name) }
     observeChanges()
+    observeNetwork()
     enrolSelf()
     registerRoutes()
     api = router.routes
@@ -157,15 +168,18 @@ final class Hub: @unchecked Sendable {
     apps.removeAll(connection)
     reporterCandidates.removeAll { $0 === connection }
     if hadApps { live.changed(.badges) }
+    network.disconnected(connection)
     connectionsChanged()
   }
 
   private func observeChanges() {
-    security.grants.onChange = { [unowned self] in
+    security.grants.onChange = { [unowned self] changed in
+      network.grantsChanged(changed)
       live.changed(.grants, .groups)
       connectionsChanged()
     }
-    security.members.onChange = { [unowned self] _ in
+    security.members.onChange = { [unowned self] group in
+      network.groupMembershipChanged(group)
       live.changed(.groups)
       connectionsChanged()
     }
@@ -181,7 +195,7 @@ final class Hub: @unchecked Sendable {
 
   /// Connections, their devices or their groups changed
   func connectionsChanged() {
-    live.changed(.connections, .devices, .status, .badges, .providers, .api)
+    live.changed(.connections, .devices, .status, .badges, .providers, .api, .netList)
     onChange()
   }
 
@@ -310,6 +324,11 @@ final class Hub: @unchecked Sendable {
     }
   }
 
+  /// Connections providing a path
+  func providers(of path: String) -> [HubConnection] {
+    services[path]?.providers.map(\.connection) ?? []
+  }
+
   /// Providers of a path the caller may call, for `hub/api/services`
   private func providers(_ path: String?, principal: Principal) -> JSON {
     guard let path, api.contains(path), let group = services[path] else { return [] }
@@ -362,6 +381,8 @@ final class Hub: @unchecked Sendable {
     object["approved"] = .bool(device.approved)
     object["revoked"] = .bool(device.revoked != nil)
     object["online"] = .bool(!attached.isEmpty || id == selfId)
+    if let state = network.deviceNetworkState(id) { object["network"] = .string(state) }
+    if let overlay = network.deviceOverlay(id) { object["overlay"] = overlay }
     object["lastSeen"] = .string(id == selfId ? isoNow() : device.lastSeen)
     if let capabilities = device.capabilities { object["capabilities"] = capabilities }
     object["services"] = .array(services)
@@ -390,6 +411,7 @@ final class Hub: @unchecked Sendable {
     }
     security.removeDevice(id)
     for key in revokedKeys { security.revokeKey(key) }
+    network.removeDevice(id, revokedKeys: revokedKeys)
     connectionsChanged()
   }
 
@@ -501,6 +523,7 @@ final class Hub: @unchecked Sendable {
     registerHubRoutes()
     registerSecurityRoutes()
     registerDeviceRoutes()
+    registerNetworkRoutes()
   }
 
   private func stream(_ stream: IncomingStream, _ topic: LiveTopic, _ compute: @escaping () throws -> JSON) throws {
@@ -686,6 +709,7 @@ final class Hub: @unchecked Sendable {
         guard security.groups.rename(group, to: name) else { return nil }
         security.members.renameGroup(group, to: name)
         security.grants.rename(.group(group), to: .group(name))
+        network.groupRenamed(group, to: name)
         connectionsChanged()
         return nil
       }
@@ -695,6 +719,7 @@ final class Hub: @unchecked Sendable {
         _ = security.groups.remove(group)
         security.members.removeGroup(group)
         security.grants.removeAll { $0.subject == .group(group) }
+        network.groupMembershipChanged(group)
         return nil
       }
       .post("hub/group/update") { [unowned self] call in
@@ -784,18 +809,6 @@ final class Hub: @unchecked Sendable {
       .stream("hub/devices/data") { [unowned self] call in
         guard let id = call.body?["id"]?.string, registry.device(id) != nil else { throw ChannelFailure("device not found") }
         try stream(call, .deviceData(id)) { [unowned self] in liveData[id] ?? [:] }
-      }
-      // Hub Network isn't served here, but agents and apps read the revoked devices (protocol.md section 10):
-      // the whole list for owners, nothing for others. Without Hub Network there are no WireGuard keys.
-      .stream("network/devices/revoked") { [unowned self] call in
-        let owner = caller(call.peer).owner
-        try stream(call, .devices) { [unowned self] in
-          guard owner else { return [] }
-          return .array(registry.order.compactMap { id in
-            guard let revoked = registry.device(id)?.revoked else { return nil }
-            return ["device": .string(id), "wireGuardKeys": [], "at": .string(revoked)]
-          })
-        }
       }
   }
 }

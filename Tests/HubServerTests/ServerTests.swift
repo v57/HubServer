@@ -275,3 +275,72 @@ final class ServerTests: XCTestCase {
     client.close()
   }
 }
+
+/// hub-server's test/network-hub.test.ts
+final class NetworkServerTests: XCTestCase {
+  func testNetworkOnTheHub() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let owner = HubKeyPair(), lostDevice = HubKeyPair(), otherDevice = HubKeyPair()
+    var configuration = HubServer.Configuration(dataDirectory: directory)
+    configuration.listen = ListenAddress(host: "127.0.0.1", port: 0)
+    configuration.owners = [owner.publicKey, lostDevice.publicKey, otherDevice.publicKey]
+    configuration.log = { _ in }
+    let server = HubServer(configuration)
+    let port = try await server.start()
+    let hubKey = server.status.hubKey!
+    let helper = ServerTests()
+    let owners = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
+
+    // There is no built-in node
+    let node = try await owners.values("hub/net/node")
+    XCTAssertEqual(node, [.null])
+    _ = try await owners.post("hub/net/node/set", "node.example:443")
+    let set = try await owners.values("hub/net/node")
+    XCTAssertEqual(set, ["node.example:443"])
+    _ = try await owners.post("hub/net/node/set", .null)
+
+    // Revoking a device removes its member and tells the other agents
+    func agent(_ device: HubKeyPair, name: String) -> TestClient {
+      let key = HubKeyPair()
+      var headers = helper.auth(key, hubKey: hubKey)
+      headers["device"] = helper.certificate(device: device, service: key, instance: name)
+      return TestClient(port: port, headers: headers)
+    }
+    let bind: (String) -> JSON = { ["version": 1, "bindingKind": "apple-app", "wireGuardKey": .string($0), "overlayAddresses": [],
+      "connectedAt": .string(isoNow()), "name": "Agent Box"] }
+    let lost = agent(lostDevice, name: "lost")
+    let other = agent(otherDevice, name: "other")
+    let lostBound = try await lost.post("hub/net/bind", bind("wg-lost"))
+    XCTAssertEqual(lostBound?["profile"]?["overlayAddresses"]?.array?.count, 2)
+    _ = try await other.post("hub/net/bind", bind("wg-other"))
+    let lostId = HubCrypto.deviceId(spki: lostDevice.publicKey)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    let devices = try await owners.values("hub/devices")
+    let listed = try XCTUnwrap(devices[0].array?.first { $0["id"]?.string == lostId })
+    XCTAssertEqual(listed["network"], "online")
+    XCTAssertTrue(listed["overlay"]?["address"]?.string?.hasPrefix("100.") == true)
+    XCTAssertNotNil(listed["overlay"]?["authority"]?.string?.range(of: "^test-mac-[a-z2-7]{16}\\.v1-[a-z2-7]{16}\\.hub\\.invalid$", options: .regularExpression))
+    _ = try await owners.post("hub/device/revoke", ["id": .string(lostId)])
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let revoked = try await other.values("network/devices/revoked")
+    XCTAssertEqual(revoked[0].array?.first?["device"]?.string, lostId)
+    XCTAssertEqual(revoked[0].array?.first?["wireGuardKeys"], ["wg-lost"])
+    let members = try await other.values("network/agents/list")
+    XCTAssertFalse(members[0].array!.contains { $0["wireGuardKey"] == "wg-lost" })
+    XCTAssertTrue(members[0].array!.contains { $0["wireGuardKey"] == "wg-other" })
+
+    // Test routes are owner-only
+    let user = TestClient(port: port, headers: helper.auth(HubKeyPair(), hubKey: hubKey))
+    do {
+      _ = try await user.post("hub/net/test/complete", "ok")
+      XCTFail("a user reached a test route")
+    } catch {
+      XCTAssertEqual((error as? ChannelFailure)?.message, "permissions required")
+    }
+    // Other Hub Network APIs answer instead of `api not found`
+    let resources = try await owners.values("network/resource/list")
+    XCTAssertEqual(resources, [[]])
+    await server.stop()
+    for client in [owners, lost, other, user] { client.close() }
+  }
+}

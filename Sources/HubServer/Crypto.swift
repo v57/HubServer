@@ -87,7 +87,10 @@ public struct HubKeyPair: Sendable {
       .base64EncodedString()
   }
   public func sign(_ message: String) -> String {
-    (try? privateKey.signature(for: Data(message.utf8)))?.base64EncodedString() ?? ""
+    sign(data: Data(message.utf8))
+  }
+  public func sign(data: Data) -> String {
+    (try? privateKey.signature(for: data))?.base64EncodedString() ?? ""
   }
   /// Loads the key file, creating it (0600, atomically) when it doesn't exist
   public static func loadOrCreate(_ url: URL) throws -> HubKeyPair {

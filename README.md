@@ -75,7 +75,7 @@ await server.stop()                                      // closes connections, 
 
 ## What it implements
 
-protocol.md sections 1–9 and 11–12:
+protocol.md sections 1–12:
 
 - `hub/info`, v0 and v1 tokens (v1 bound to the hub key, 30 s skew, 300 s maximum lifetime), `requireV1`,
   the whitelist (lockdown mode)
@@ -95,10 +95,27 @@ protocol.md sections 1–9 and 11–12:
 - corrupt stores are moved aside; a corrupt `hub.json`, `paths.json`, `whitelist.json`, `group-members.json`,
   `grants.json` or `devices.json` locks the hub down to owners until an owner sets the mode
 
+## Hub Network
+
+The network control plane of hub-server (`src/network/*`, protocol.md section 10), with the same wire format and
+signatures (checked against hub-server's vectors and a Go-signed admission):
+
+- `hub/net/bind` with the `machine` (proof from this host's agent socket), `apple-app` (owners) and `join`
+  (inviter-signed admission) kinds; members keyed `device:<id>`, one endpoint per device, endpoint replacement after a
+  reinstall; overlay addresses from `100.96.0.0/11` and `fd48:5542:4e45::/48`, released a day after a member leaves
+- shares (`network/shares/*`, `canonicalAuthority`, `share_device_mismatch`), share policies as grants, resource
+  generations, hub-signed connection grants, rendezvous tickets and gateway grants
+- `network/agents/list` with `member`, `device` and `deviceAuthority`, `network/devices/revoked` with WireGuard keys,
+  `hub/net/node` (`null` until set), `hub/net/list`, `hub/net/local-agent`, `hub/net/apple-agent/*`, owner-only test routes
+- `hub/devices` shows each device's `network` state and `overlay` address
+
+The `machine` agent proves itself over `/var/run/hub-net/agent.sock` (macOS) or `/run/hub-net/agent.sock` (Linux);
+`localAgentEndpoint` (`--net-agent`, `HUB_NET_AGENT_SOCKET`) picks another socket or `tcp://host:port`, for an agent
+that runs next to the hub in a container. On iOS there is no machine agent: the app's packet tunnel binds as
+`apple-app`.
+
 ## Not implemented
 
-- **Hub Network** (`hub/net/*`, `network/*`, protocol.md section 10): answered with `api not found`, except
-  `network/devices/revoked`, which lists the revoked devices (without WireGuard keys) for owners.
 - Merging and proxies (`hub/merge/add|remove`, `hub/proxy*`, `--merge`, `--proxy`). `hub/merge/status` streams `[]`.
 - The Apple local network agent APIs.
 - Migration of the pre-grants stores (`clients.json`, path lists in `groups.json`, `group_users.json`): a data

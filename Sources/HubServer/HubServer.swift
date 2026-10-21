@@ -36,6 +36,9 @@ public final class HubServer: @unchecked Sendable {
     public var name: String?
     /// Makes a pairing code at start when the hub has no owners
     public var pairsAtStart = true
+    /// Where the `machine` Hub Network agent of this host proves itself: its Unix socket (`/var/run/hub-net/agent.sock`
+    /// on macOS, `/run/hub-net/agent.sock` on Linux, by default), or `tcp://host:port` where that socket is forwarded
+    public var localAgentEndpoint: String?
     /// Where log lines go, stdout by default
     public var log: @Sendable (String) -> Void = { print($0) }
 

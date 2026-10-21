@@ -11,7 +11,8 @@ options and the embedding API.
 - `Sources/HubServer`: `HubServer` (public API) → `Hub` (connections, routing, built-in routes), `Security`
   (tokens, modes, grants, groups, members, hosting, whitelist, `hub.json`), `Devices` (certificates, `devices.json`),
   `Services` (providers, balancers, apps), `Pairing`, `Store` (atomic JSON stores), `Live` (streams of current
-  values), `Crypto` (SPKI/PKCS#8 keys, device ids, scrypt).
+  values), `Crypto` (SPKI/PKCS#8 keys, device ids, scrypt), `Network/` (Hub Network: foundations and canonical-JSON
+  signatures, registry, local agent, API, routes; mirrors hub-server's `src/network/*`).
 - `Sources/hub-server-swift`: the command. `Sources/channel-fixture`: routes of `Channel/channel/tests/server.ts`.
 
 ## Rules

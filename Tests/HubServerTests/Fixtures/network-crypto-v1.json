@@ -1,0 +1,87 @@
+{
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "publicKey": "MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "vectors": [
+    {
+      "purpose": "agent-attestation",
+      "envelope": {
+        "version": 1,
+        "attestationId": "att-1",
+        "serviceKey": "service-key",
+        "agentKey": "agent-key",
+        "shareName": "s3",
+        "protocol": "tcp",
+        "target": {
+          "host": "127.0.0.1",
+          "port": 9001
+        },
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "expiresAt": "2026-07-25T00:05:00.000Z"
+      },
+      "inputSha256": "99c24fde48133f980e478c823e34b0879c4b21965ad0e52233e37cf334f18ba6",
+      "signature": "R0DS48CJX381X/Rlqzp+KFnGEpGaPeMsc0pac9eYYWfsJykt5qibw6kUi5AfJnnUmD02J4CxBHUKMLrmprV9BA=="
+    },
+    {
+      "purpose": "profile-binding",
+      "envelope": {
+        "version": 1,
+        "bindingId": "binding-1",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "profileKey": "profile-key",
+        "agentKey": "agent-key",
+        "wireGuardKey": "wg-key",
+        "overlayAddresses": [
+          "100.96.0.2",
+          "fd48:5542:4e45::2"
+        ],
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "expiresAt": "2026-07-25T00:05:00.000Z"
+      },
+      "inputSha256": "280e4c41e0f75735115794d2859c12113c1795cf0eb6aa84ddbbfa078be50e72",
+      "signature": "dNq/qLN31VbE6gk5zzQhsUAXjggIqaGWmqICWOzUymm09x0MGCQzCCDi+vb6NwlqkfnpDcfNEIjpD2ViLc0fBA=="
+    },
+    {
+      "purpose": "connection-grant",
+      "envelope": {
+        "version": 1,
+        "grantId": "grant-1",
+        "hubKey": "hub-key",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "callerProfileKey": "caller-profile-key",
+        "callerWireGuardKey": "caller-wg-key",
+        "targetAgentKey": "target-agent-key",
+        "targetWireGuardKey": "target-wg-key",
+        "resourceId": "hnr1_vu5lgvuep3ijwvktdc3c7jtlkbq7tpio",
+        "providerId": "provider-1",
+        "protocol": "tcp",
+        "destinationAddress": "100.96.0.2",
+        "destinationPort": 9001,
+        "generation": 4,
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "expiresAt": "2026-07-25T00:01:00.000Z"
+      },
+      "inputSha256": "4a391c5b5793f67b62324cf7c49d3fa5c5e1f6fbd8165ef8f76fa5801c8cd9d8",
+      "signature": "LIRjvfxXXxnORiacj0zgUQmUbldMiqTsr1lQ3UGk5+oJ80XBJ9fbNt46hoIB1x/vKEXXi1gh9QRrdR0mfdyzCw=="
+    },
+    {
+      "purpose": "rendezvous-ticket",
+      "envelope": {
+        "version": 1,
+        "ticketId": "ticket-1",
+        "hubKey": "hub-key",
+        "hubNetworkId": "018f0f67-89ab-7def-8123-456789abcdef",
+        "profileKey": "profile-key",
+        "agentKey": "agent-key",
+        "nodeId": "node-1",
+        "roles": [
+          "rendezvous"
+        ],
+        "sessionPurpose": "peer-connect",
+        "issuedAt": "2026-07-25T00:00:00.000Z",
+        "expiresAt": "2026-07-25T00:01:00.000Z"
+      },
+      "inputSha256": "7348067d0816cefd156832d00e8ab8d6fed872aa3877245ad1a605834acfb4b2",
+      "signature": "vJbuj5XFAK1u/dPI3riTTrDbNb10iAMgwJDNUtX74Th5BzjwtnhjKZfMqVi5ic2xqDsuG6h5SB+63kUrbXYDBg=="
+    }
+  ]
+}

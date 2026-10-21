@@ -4,6 +4,7 @@ import XCTest
 
 /// Docs/Devices/vectors.json, copied to Fixtures/device-vectors.json
 final class VectorTests: XCTestCase {
+  var storages: [Storage] = []
   let vectors = try! JSON.parse(Data(contentsOf: Bundle.module.url(forResource: "device-vectors", withExtension: "json", subdirectory: "Fixtures")!))
 
   func testKeys() throws {
@@ -72,6 +73,7 @@ final class VectorTests: XCTestCase {
   private func makeSecurity(hubKey: String) throws -> Security {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let storage = Storage(directory: directory, queue: DispatchQueue(label: "test"), log: { _ in })
+    storages.append(storage)
     let security = Security(storage: storage, hubKey: hubKey)
     security.load(hubKeyExisted: false)
     return security
@@ -106,6 +108,7 @@ final class SecurityTests: XCTestCase {
   func testCallsByMode() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let storage = Storage(directory: directory, queue: DispatchQueue(label: "test"), log: { _ in })
+    defer { withExtendedLifetime(storage) {} }
     let security = Security(storage: storage, hubKey: "hub")
     security.load(hubKeyExisted: false)
     XCTAssertEqual(security.mode, .defaultDeny)

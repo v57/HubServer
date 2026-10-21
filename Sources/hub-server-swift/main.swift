@@ -14,6 +14,8 @@ let help = """
     --launcher <key>       let this key host launcher/* (env HUBLAUNCHER)
     --local                local mode: 127.0.0.1 only, default-allow, the launcher key is an owner, no pairing
                            (env HUB_MODE=local)
+    --net-agent <endpoint> where this host's Hub Network agent proves itself: its Unix socket, or tcp://host:port
+                           when it runs next to the hub in a container (env HUB_NET_AGENT_SOCKET)
     --pair                 write a new pairing code to the data directory, print it and exit; a running hub on that
                            directory takes it at once (a hub without owners makes one at start anyway)
     -h, --help             print this help
@@ -30,6 +32,7 @@ var owners = [nonEmpty(environment["HUBOWNER"])].compactMap { $0 }
 var launcher = nonEmpty(environment["HUBLAUNCHER"])
 var local = environment["HUB_MODE"] == "local"
 var pair = false
+var netAgent = nonEmpty(environment["HUB_NET_AGENT_SOCKET"])
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 while !arguments.isEmpty {
@@ -48,6 +51,7 @@ while !arguments.isEmpty {
   case "--launcher": launcher = value()
   case "--local": local = true
   case "--pair": pair = true
+  case "--net-agent": netAgent = value()
   case "--merge", "--proxy":
     print("\(argument) isn't supported by the Swift HubServer, ignored \(value())")
   case "-h", "--help":
@@ -90,6 +94,7 @@ configuration.listen = address
 configuration.local = local
 configuration.owners = owners
 configuration.launcherKey = launcher
+configuration.localAgentEndpoint = netAgent
 do {
   configuration.devicePublicKey = try HubKeyPair.loadOrCreate(deviceKeyURL()).publicKey
 } catch {

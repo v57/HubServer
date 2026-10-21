@@ -1,0 +1,30 @@
+{
+  "admission": {
+    "version": 1,
+    "signatureDomain": "hub-network/direct-bootstrap-response/v1",
+    "replayId": "JmBmHFv4Yp0AqJ8u1hYc8cKbgW0JgQ0eVb2y8d3wJ2M",
+    "inviterServiceKey": "MCowBQYDK2VwAyEA6Y5Vwsz3dB16XfN05VdkhwRFnTSVtZ80D8fVOc4DUOA=",
+    "joinerServiceKey": "MCowBQYDK2VwAyEAFfCtrZ7DtkeheB+xo+BEhhkWkzWJactsne71nM4fatU=",
+    "joinerWireGuardKey": "GZ3aN0xCqJ1uYb3W0Z9h4Q6n2m8d1w6P7f2E5r4T3k8=",
+    "inviterWireGuardKey": "bH4t7kq3Zp6Wc1N2x9Y5v8R0m3J6d2F4g7S1a5L8e0Q=",
+    "endpoints": [
+      {
+        "address": "192.168.65.4",
+        "port": 51820,
+        "transport": "udp"
+      }
+    ],
+    "joinerAddress": {
+      "ipv4": "100.127.255.254",
+      "ipv6": "fd48:5542:4e45:ffff::fffe"
+    },
+    "inviterAddress": {
+      "ipv4": "100.127.255.253",
+      "ipv6": "fd48:5542:4e45:ffff::fffd"
+    },
+    "hubProHost": "100.127.255.253",
+    "issuedAt": "2026-10-13T00:00:00Z",
+    "expiresAt": "2026-10-13T00:02:00Z",
+    "signature": "U7YxKxq4SiXBYaTrGZy7t7pmd5eJhmrjp+X68QjiCqmA826qw538G127NpM7nDsu9eeZcBVjEZ8pceapKhugDg=="
+  }
+}
