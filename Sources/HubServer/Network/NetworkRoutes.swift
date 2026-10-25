@@ -21,21 +21,26 @@ let networkAPINames: [(String, String)] = [
 
 /// `hub-net-node.json`: the node agents use. There is no built-in node: `null` until an owner sets one.
 final class NetNodeStore {
-  private(set) var value: String?
+  /// The coordinator v57 runs for everyone: a hub uses it until an owner sets another
+  static let defaultNode = "wss://v57.dev:1964"
+  /// The node an owner set, `nil` for the default
+  private(set) var stored: String?
+  var value: String { stored ?? Self.defaultNode }
   let store: JSONStore
   init(storage: Storage) {
     store = storage.store("hub-net-node.json")
-    store.encode = { [unowned self] in value.map { .string($0) } ?? .null }
+    store.encode = { [unowned self] in stored.map { .string($0) } ?? .null }
   }
   func load() {
-    store.load { json in value = Self.validate(json) }
+    store.load { json in stored = Self.validate(json) }
   }
+  /// Sets the node; `null` goes back to the default
   func set(_ input: JSON?) throws {
     if let input, !input.isNull {
       guard let node = Self.validate(input) else { throw ChannelFailure("invalid node address") }
-      value = node
+      stored = node
     } else {
-      value = nil
+      stored = nil
     }
     store.writeNow()
   }

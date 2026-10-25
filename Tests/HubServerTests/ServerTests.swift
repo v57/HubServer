@@ -297,9 +297,9 @@ final class NetworkServerTests: XCTestCase {
     let helper = ServerTests()
     let owners = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
 
-    // There is no built-in node
+    // v57's coordinator until an owner sets another
     let node = try await owners.values("hub/net/node")
-    XCTAssertEqual(node, [.null])
+    XCTAssertEqual(node, ["wss://v57.dev:1964"])
     _ = try await owners.post("hub/net/node/set", "node.example:443")
     let set = try await owners.values("hub/net/node")
     XCTAssertEqual(set, ["node.example:443"])
