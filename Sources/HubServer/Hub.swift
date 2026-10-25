@@ -76,6 +76,7 @@ final class Hub: @unchecked Sendable {
     }
     security.deviceName = { [unowned self] id in registry.device(id)?.name }
     network.localAgentEndpoint = configuration.localAgentEndpoint ?? LocalAgent.defaultEndpoint
+    if configuration.listen.port != 0 { network.hubPort = Int(configuration.listen.port) }
     network.load()
     netNode.load()
     for (path, name) in networkAPINames { security.names.register(path, name: name) }

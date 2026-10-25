@@ -5,7 +5,7 @@ import Foundation
 let networkAPINames: [(String, String)] = [
   ("network/shares/replace", "Hub Network: Manage Shares"), ("network/shares/published", "Hub Network: Manage Shares"),
   ("hub/net/bind", "Hub Network: Bind Agent"), ("network/connection/grant", "Hub Network: Connection Grant"),
-  ("network/rendezvous/ticket", "Hub Network: Rendezvous Ticket"), ("network/resource/update", "Hub Network: Manage Resources"),
+  ("network/links", "Hub Network: Peer Links"), ("network/resource/update", "Hub Network: Manage Resources"),
   ("network/resource/revoke", "Hub Network: Manage Resources"), ("network/resource/list", "Hub Network: View Resources"),
   ("network/resource/generations", "Hub Network: View Status"), ("network/providers/list", "Hub Network: View Resources"),
   ("network/agents/list", "Hub Network: View Agents"), ("network/status/agents", "Hub Network: View Status"),
@@ -95,8 +95,9 @@ extension Hub {
       .post("network/connection/grant") { [unowned self] call in
         ["grant": try network.connectionGrant(call.body, connection: connection(call.peer))]
       }
-      .post("network/rendezvous/ticket") { [unowned self] call in
-        ["ticket": try network.rendezvousTicket(call.body, connection: connection(call.peer))]
+      .stream("network/links") { [unowned self] call in
+        let connection = connection(call.peer)
+        try live.stream(call, topic: .network) { [unowned self] in try network.links(connection, coordinator: netNode.value) }
       }
       .post("network/gateway/advertise") { [unowned self] call in
         try gatewayError { ["status": try network.advertiseGateway(call.body, connection: connection(call.peer))] }

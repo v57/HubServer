@@ -51,8 +51,12 @@ final class NetworkAPI {
     registry.setHubKey(key.publicKey)
   }
 
-  private var hubNetworkId: String { registry.hubNetworkId }
-  private var hubKey: String { registry.hubKey }
+  var hubNetworkId: String { registry.hubNetworkId }
+  var hubKey: String { registry.hubKey }
+  /// The port the hub listens on, which a member's `hub` link lets it open on the hub's machine
+  var hubPort = 1997
+  /// Issued peer link grants by their sides, reused until half their lifetime has passed
+  var peerLinkGrants: [String: (grant: JSON, expiresAt: Date)] = [:]
 
   private func requireKey(_ connection: HubConnection) throws -> String {
     guard let key = connection.key else { throw networkError("unauthorized", "authentication required") }
@@ -275,7 +279,7 @@ final class NetworkAPI {
     return registry.hasAllocation(deviceMember(device))
   }
 
-  private func authenticatedProfile(_ connection: HubConnection) throws -> AgentProfile {
+  func authenticatedProfile(_ connection: HubConnection) throws -> AgentProfile {
     let key = try requireKey(connection)
     guard let profile = agents.profile(key) else { throw networkError("unauthorized", "agent profile not registered") }
     return profile
@@ -370,26 +374,10 @@ final class NetworkAPI {
     return grant
   }
 
-  private func signed(_ purpose: SignaturePurpose, _ envelope: JSON) -> JSON {
+  func signed(_ purpose: SignaturePurpose, _ envelope: JSON) -> JSON {
     var object = envelope.object ?? [:]
     object["signature"] = .string(NetworkSignature.sign(purpose, envelope, key: key))
     return .object(object)
-  }
-
-  /// `network/rendezvous/ticket`: lets a bound agent use the network's node
-  func rendezvousTicket(_ body: JSON?, connection: HubConnection) throws -> JSON {
-    let key = try requireKey(connection)
-    guard agents.profile(key) != nil else { throw networkError("unauthorized", "agent profile not registered") }
-    let roles = body?["roles"]?.array ?? ["rendezvous"]
-    guard roles == ["rendezvous"] else { throw networkError("invalid_request", "only the rendezvous node role is supported") }
-    let now = Date()
-    let ticket: JSON = [
-      "version": .int(NetworkFoundation.wireVersion), "ticketId": .string(newId()), "hubKey": .string(hubKey),
-      "hubNetworkId": .string(hubNetworkId), "key": .string(key), "nodeId": body?["nodeId"] ?? .null, "roles": ["rendezvous"],
-      "sessionPurpose": "peer-connect", "issuedAt": .string(isoDate(now)),
-      "expiresAt": .string(isoDate(now.addingTimeInterval(NetworkTime.rendezvousTicketLifetime))), "signature": "",
-    ]
-    return signed(.rendezvousTicket, ticket)
   }
 
   // MARK: Gateways
@@ -693,6 +681,7 @@ final class NetworkAPI {
   /// Removes the member of a removed or revoked device, and legacy members of its revoked keys, releasing their
   /// addresses. Their WireGuard keys go to `network/devices/revoked`, so every agent drops them as peers.
   func removeDevice(_ device: String, revokedKeys: [String]) {
+    for key in revokedKeys { forgetPeerLinkGrants(of: key) }
     var wireGuardKeys: [String] = []
     func add(_ key: String) { if !wireGuardKeys.contains(key) { wireGuardKeys.append(key) } }
     for key in [deviceMember(device)] + revokedKeys {

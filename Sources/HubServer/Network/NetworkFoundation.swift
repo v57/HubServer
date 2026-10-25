@@ -117,6 +117,7 @@ enum SignaturePurpose: String, CaseIterable {
   case gatewayGrant = "gateway-grant"
   case appleAppAgentReadiness = "apple-app-agent-readiness"
   case directBootstrapResponse = "direct-bootstrap-response"
+  case peerLink = "peer-link"
 
   var domain: String {
     switch self {
@@ -128,6 +129,7 @@ enum SignaturePurpose: String, CaseIterable {
     case .gatewayGrant: "hub-network/gateway-grant/v1"
     case .appleAppAgentReadiness: "hub-network/apple-app-agent-readiness/v1"
     case .directBootstrapResponse: "hub-network/direct-bootstrap-response/v1"
+    case .peerLink: "hub-network/peer-link/v1"
     }
   }
 }

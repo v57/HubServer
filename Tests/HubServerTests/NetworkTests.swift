@@ -392,4 +392,50 @@ final class NetworkAPITests: XCTestCase {
     try bindings.authorizeRebind(other.publicKey)
     XCTAssertNoThrow(try bindings.registerMachine(key: other.publicKey, connectionId: "c2", proof: .object(otherProof)))
   }
+
+  func testMembersGetASignedHubLinkToTheHubsMachine() throws {
+    // The hub's machine: an owner bound as the Apple app agent
+    let machine = owner()
+    let machineConnection = connection(machine.publicKey)
+    _ = try bind(bindRequest("wg-machine"), machineConnection)
+    let now = Date()
+    var assertion: JSON = ["version": 1, "signatureDomain": "hub-network/apple-app-agent-readiness/v1",
+      "hubNetworkId": .string(api.registry.hubNetworkId), "wireGuardKey": "wg-machine", "tunnelInstanceId": "t1",
+      "capabilities": ["invitation-bootstrap-v1"], "generation": 1, "issuedAt": .string(isoDate(now)),
+      "expiresAt": .string(isoDate(now.addingTimeInterval(20)))]
+    var object = assertion.object!
+    object["signature"] = .string(NetworkSignature.sign(.appleAppAgentReadiness, assertion, key: machine))
+    assertion = .object(object)
+    _ = try api.appleAgent(["version": 1, "assertion": assertion], connection: machineConnection, renew: false)
+
+    let phone = owner()
+    let phoneConnection = connection(phone.publicKey)
+    _ = try bind(bindRequest("wg-phone"), phoneConnection)
+    api.hubPort = 1997
+
+    let links = try api.links(phoneConnection, coordinator: "wss://v57.dev:1964")
+    XCTAssertEqual(links["coordinator"], "wss://v57.dev:1964")
+    XCTAssertEqual(links["hubHost"], false)
+    let grant = try XCTUnwrap(links["grants"]?.array?.first)
+    XCTAssertEqual(grant["purpose"], "hub")
+    XCTAssertEqual(grant["a"]?["key"]?.string, phone.publicKey)
+    XCTAssertEqual(grant["a"]?["wireGuardKey"], "wg-phone")
+    XCTAssertEqual(grant["b"]?["key"]?.string, machine.publicKey)
+    XCTAssertEqual(grant["b"]?["wireGuardKey"], "wg-machine")
+    let machineAddresses = try XCTUnwrap(grant["b"]?["addresses"]?.strings)
+    XCTAssertEqual(grant["aViaB"]?.strings, machineAddresses.map(NetworkAPI.hostRoute))
+    XCTAssertEqual(grant["aToB"], [["protocol": "tcp", "port": 1997]])
+    XCTAssertTrue(NetworkSignature.verify(.peerLink, grant, publicKey: api.registry.hubKey))
+    // The same sides get the same grant until half its life has passed
+    XCTAssertEqual(try api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first?["grantId"], grant["grantId"])
+
+    // The machine itself accepts links and gets none of its own
+    let own = try api.links(machineConnection, coordinator: "wss://v57.dev:1964")
+    XCTAssertEqual(own["hubHost"], true)
+    XCTAssertEqual(own["grants"], [])
+    // Without a registered profile there's nothing to link
+    let stranger = connection(HubKeyPair().publicKey)
+    XCTAssertEqual(code { try self.api.links(stranger, coordinator: "x") }, "unauthorized")
+  }
+
 }
