@@ -19,7 +19,7 @@ let networkAPINames: [(String, String)] = [
   ("hub/net/apple-agent/unbind", "Hub Network: Unbind Apple Local Agent"),
 ]
 
-/// `hub-net-node.json`: the node agents use. There is no built-in node: `null` until an owner sets one.
+/// `hub-net-node.json`: the node agents use, `null` (the default node) until an owner sets one.
 final class NetNodeStore {
   /// The coordinator v57 runs for everyone: a hub uses it until an owner sets another
   static let defaultNode = "wss://v57.dev:1964"
