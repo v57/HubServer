@@ -32,6 +32,9 @@ public final class HubServer: @unchecked Sendable {
     public var platform: String? = Configuration.hostPlatform
     /// The hub's instance on its device
     public var instance = "hub-server"
+    /// What runs the hub, in `hub/info`: `app` when the Hub app embeds it, so its devices know that app is the hub's
+    /// Hub Network agent (the hub-net of a hub-server). `nil` for a hub-server.
+    public var host: String?
     /// The hub's display name (`hub/header`) on a first start, the host name by default
     public var name: String?
     /// Makes a pairing code at start when the hub has no owners

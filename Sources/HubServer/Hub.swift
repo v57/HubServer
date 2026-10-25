@@ -551,7 +551,9 @@ final class Hub: @unchecked Sendable {
   private func registerHubRoutes() {
     router
       .post("hub/info") { [unowned self] _ in
-        ["key": .string(hubKey), "protocol": 1, "pro": true, "mode": .string(security.effectiveMode.rawValue)]
+        var info: JSONObject = ["key": .string(hubKey), "protocol": 1, "pro": true, "mode": .string(security.effectiveMode.rawValue)]
+        if let host = configuration.host { info["host"] = .string(host) }
+        return .object(info)
       }
       .post("hub/pair", answering: { [unowned self] call in pair(call) })
       .post("hub/pair/new", answering: { [unowned self] call in
