@@ -198,7 +198,9 @@ enum NetworkSignature {
 enum NetworkTime {
   static let connectionGrantLifetime: TimeInterval = 5 * 60
   static let rendezvousTicketLifetime: TimeInterval = 10 * 60
-  static let gatewayGrantLifetime: TimeInterval = 5 * 60
+  /// As long as a peer link (hub-server GATEWAY_GRANT_MAX_LIFETIME_MS): a member keeps using a gateway while its app
+  /// sleeps, and renews once half has passed
+  static let gatewayGrantLifetime: TimeInterval = 30 * 24 * 3600
   static let appleReadinessLifetime: TimeInterval = 30
   static let directBootstrapLifetime: TimeInterval = 10 * 60
   static let clockSkew: TimeInterval = 30
