@@ -16,7 +16,7 @@ extension NetworkAPI {
     let host = hubHostProfile
     var grants: [JSON] = []
     if let host, host.key != caller.key {
-      grants.append(peerLinkGrant(purpose: "hub", member: caller, host: host))
+      grants.append(peerLinkGrant(purpose: "hub", member: caller, host: host, ports: hostSharePorts(host, connection)))
     }
     return [
       "version": .int(NetworkFoundation.wireVersion), "hubKey": .string(hubKey), "hubNetworkId": .string(hubNetworkId),
@@ -31,11 +31,22 @@ extension NetworkAPI {
     return agents.profile(key)
   }
 
+  /// The ports of the shares the hub's machine fronts that the caller may open, besides the hub's: a service's web UI
+  /// on that machine is reached through the same link
+  private func hostSharePorts(_ host: AgentProfile, _ connection: HubConnection) -> [(protocol: String, port: Int)] {
+    var ports: [String: (protocol: String, port: Int)] = ["tcp/\(hubPort)": ("tcp", hubPort)]
+    for provider in agents.listProviders where provider.key == host.key {
+      guard let resource = registry.resource(provider.resourceId), canAccessShare(resource, connection) else { continue }
+      ports["\(provider.protocol)/\(provider.port)"] = (provider.protocol, provider.port)
+    }
+    return ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }
+  }
+
   /// The signed `hub` grant between a member and the hub's machine: the member routes the machine's overlay addresses
-  /// through it and may open the hub's port, the machine routes the member's addresses back
-  private func peerLinkGrant(purpose: String, member: AgentProfile, host: AgentProfile) -> JSON {
+  /// through it and may open `ports` there (the hub's and its shares'), the machine routes the member's addresses back
+  private func peerLinkGrant(purpose: String, member: AgentProfile, host: AgentProfile, ports: [(protocol: String, port: Int)]) -> JSON {
     let sides = [purpose, member.key, member.wireGuardKey, host.key, host.wireGuardKey]
-      + member.overlayAddresses + host.overlayAddresses + [String(hubPort)]
+      + member.overlayAddresses + host.overlayAddresses + ports.map { "\($0.protocol)/\($0.port)" }
     let cacheKey = sides.joined(separator: "\u{0}")
     if let cached = peerLinkGrants[cacheKey], cached.expiresAt.timeIntervalSinceNow > Self.peerLinkLifetime / 2 {
       return cached.grant
@@ -50,7 +61,7 @@ extension NetworkAPI {
       "version": .int(NetworkFoundation.wireVersion), "grantId": .string(newId()), "hubKey": .string(hubKey),
       "hubNetworkId": .string(hubNetworkId), "purpose": .string(purpose), "a": side(member), "b": side(host),
       "aViaB": JSON(host.overlayAddresses.map(Self.hostRoute)), "bViaA": JSON(member.overlayAddresses.map(Self.hostRoute)),
-      "aToB": [["protocol": "tcp", "port": .int(hubPort)]], "bToA": [],
+      "aToB": .array(ports.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }), "bToA": [],
       "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(expiresAt)), "signature": "",
     ])
     peerLinkGrants[cacheKey] = (grant, expiresAt)

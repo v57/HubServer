@@ -393,8 +393,8 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertNoThrow(try bindings.registerMachine(key: other.publicKey, connectionId: "c2", proof: .object(otherProof)))
   }
 
-  func testMembersGetASignedHubLinkToTheHubsMachine() throws {
-    // The hub's machine: an owner bound as the Apple app agent
+  /// The hub's machine: an owner bound as the Apple app agent
+  func hubMachine() throws -> (key: HubKeyPair, connection: HubConnection) {
     let machine = owner()
     let machineConnection = connection(machine.publicKey)
     _ = try bind(bindRequest("wg-machine"), machineConnection)
@@ -407,7 +407,11 @@ final class NetworkAPITests: XCTestCase {
     object["signature"] = .string(NetworkSignature.sign(.appleAppAgentReadiness, assertion, key: machine))
     assertion = .object(object)
     _ = try api.appleAgent(["version": 1, "assertion": assertion], connection: machineConnection, renew: false)
+    return (machine, machineConnection)
+  }
 
+  func testMembersGetASignedHubLinkToTheHubsMachine() throws {
+    let (machine, machineConnection) = try hubMachine()
     let phone = owner()
     let phoneConnection = connection(phone.publicKey)
     _ = try bind(bindRequest("wg-phone"), phoneConnection)
@@ -436,6 +440,43 @@ final class NetworkAPITests: XCTestCase {
     // Without a registered profile there's nothing to link
     let stranger = connection(HubKeyPair().publicKey)
     XCTAssertEqual(code { try self.api.links(stranger, coordinator: "x") }, "unauthorized")
+  }
+
+  func testTheHubLinkOpensThePortsOfTheMachinesSharesTheMemberMayOpen() throws {
+    let (machine, _) = try hubMachine()
+    let service = HubKeyPair()
+    let serviceConnection = connection(service.publicKey)
+    func share(_ name: String, _ port: Int, _ policy: JSON) -> JSON {
+      let now = Date()
+      var attestation: JSON = ["version": 1, "attestationId": .string(UUID().uuidString), "serviceKey": .string(service.publicKey),
+        "key": .string(machine.publicKey), "shareName": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+        "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(now.addingTimeInterval(60))), "signature": ""]
+      var object = attestation.object!
+      object["signature"] = .string(NetworkSignature.sign(.agentAttestation, attestation, key: machine))
+      attestation = .object(object)
+      return ["version": 1, "name": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+        "policy": policy, "attestation": attestation]
+    }
+    _ = try api.replaceShares([share("web", 8080, ["mode": "hub"]), share("admin", 9000, ["mode": "private"])], connection: serviceConnection)
+
+    // A member that isn't an owner opens the hub's port and the share everyone may open, not the private one
+    let phone = HubKeyPair()
+    let phoneConnection = connection(phone.publicKey)
+    _ = try api.registerProfile(bindRequest("wg-phone"), connection: phoneConnection)
+    let grant = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first)
+    XCTAssertEqual(grant["aToB"], [["protocol": "tcp", "port": 1997], ["protocol": "tcp", "port": 8080]])
+    // An owner opens both, in a grant of its own
+    let ownerPhone = owner()
+    let ownerConnection = connection(ownerPhone.publicKey)
+    _ = try bind(bindRequest("wg-owner"), ownerConnection)
+    let ownerGrant = try XCTUnwrap(api.links(ownerConnection, coordinator: "x")["grants"]?.array?.first)
+    XCTAssertEqual(ownerGrant["aToB"]?.array?.compactMap { $0["port"]?.int }, [1997, 8080, 9000])
+
+    // Once the service stops sharing, the member's next grant closes the port again
+    _ = try api.replaceShares([], connection: serviceConnection)
+    let closed = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first)
+    XCTAssertEqual(closed["aToB"], [["protocol": "tcp", "port": 1997]])
+    XCTAssertNotEqual(closed["grantId"], grant["grantId"])
   }
 
 }

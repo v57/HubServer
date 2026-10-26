@@ -244,7 +244,7 @@ final class NetworkAPI {
     return try registerProfile(request, connection: connection)
   }
 
-  private func registerProfile(_ request: JSON, connection: HubConnection) throws -> JSON {
+  func registerProfile(_ request: JSON, connection: HubConnection) throws -> JSON {
     let key = try requireKey(connection)
     try checkProfile(request)
     // One agent per device. Its proof passed, so a pending device is approved and the member is the device.
@@ -545,7 +545,7 @@ final class NetworkAPI {
 
   /// Share access is a grant (protocol.md section 9): owners and the share's own service always, unless the share
   /// is disabled; anyone else needs a `{ share }` grant
-  private func canAccessShare(_ resource: NetworkResource, _ connection: HubConnection) -> Bool {
+  func canAccessShare(_ resource: NetworkResource, _ connection: HubConnection) -> Bool {
     guard resource.mode != "disabled", let key = connection.key else { return false }
     if isOwner(connection) || resource.ownerKey == key { return true }
     return security.grants.allowsShare(security.caller(connection.principal), resource.resourceId)
