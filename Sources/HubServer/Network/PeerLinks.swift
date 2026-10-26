@@ -32,12 +32,15 @@ extension NetworkAPI {
   }
 
   /// The ports of the shares the hub's machine fronts that the caller may open, besides the hub's: a service's web UI
-  /// on that machine is reached through the same link
+  /// on that machine is reached through the same link. Its SSH server too, for callers that may sign in there
   private func hostSharePorts(_ host: AgentProfile, _ connection: HubConnection) -> [(protocol: String, port: Int)] {
     var ports: [String: (protocol: String, port: Int)] = ["tcp/\(hubPort)": ("tcp", hubPort)]
     for provider in agents.listProviders where provider.key == host.key {
       guard let resource = registry.resource(provider.resourceId), canAccessShare(resource, connection) else { continue }
       ports["\(provider.protocol)/\(provider.port)"] = (provider.protocol, provider.port)
+    }
+    if let device = host.device, let port = deviceSSHPort(device), canUseHostSSH(connection) {
+      ports["tcp/\(port)"] = ("tcp", port)
     }
     return ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }
   }

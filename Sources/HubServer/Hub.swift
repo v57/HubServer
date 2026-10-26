@@ -458,6 +458,8 @@ final class Hub: @unchecked Sendable {
       try checkSSH(id, capabilities["ssh"])
     }
     try registry.update(id, name: body["name"]?.string, os: body["os"]?.string, arch: body["arch"]?.string, capabilities: capabilities)
+    // Hub Network reopens links for the SSH port the device reports
+    network.onStateChanged()
   }
 
   /// `ssh.hostKey` and every `ssh.hostKeys` entry must carry the device's signature over `ssh1:<hostKey>`

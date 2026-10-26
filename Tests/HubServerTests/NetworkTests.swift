@@ -394,9 +394,9 @@ final class NetworkAPITests: XCTestCase {
   }
 
   /// The hub's machine: an owner bound as the Apple app agent
-  func hubMachine() throws -> (key: HubKeyPair, connection: HubConnection) {
+  func hubMachine(device: String? = nil) throws -> (key: HubKeyPair, connection: HubConnection) {
     let machine = owner()
-    let machineConnection = connection(machine.publicKey)
+    let machineConnection = connection(machine.publicKey, device: device)
     _ = try bind(bindRequest("wg-machine"), machineConnection)
     let now = Date()
     var assertion: JSON = ["version": 1, "signatureDomain": "hub-network/apple-app-agent-readiness/v1",
@@ -477,6 +477,38 @@ final class NetworkAPITests: XCTestCase {
     let closed = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first)
     XCTAssertEqual(closed["aToB"], [["protocol": "tcp", "port": 1997]])
     XCTAssertNotEqual(closed["grantId"], grant["grantId"])
+  }
+
+  func testTheHubLinkOpensTheMachinesSSHPortForOwnersAndCallersGrantedNetworkSSH() throws {
+    _ = try hubMachine(device: "mac")
+    api.deviceSSHPort = { $0 == "mac" ? 22 : nil }
+    func ports(_ connection: HubConnection) throws -> [Int] {
+      try XCTUnwrap(api.links(connection, coordinator: "x")["grants"]?.array?.first?["aToB"]?.array).compactMap { $0["port"]?.int }
+    }
+
+    // An owner reaches the SSH server, a member without a grant only the hub
+    let ownerConnection = connection(owner().publicKey)
+    _ = try api.registerProfile(bindRequest("wg-owner"), connection: ownerConnection)
+    XCTAssertEqual(try ports(ownerConnection), [22, 1997])
+    let phone = HubKeyPair()
+    let phoneConnection = connection(phone.publicKey)
+    _ = try api.registerProfile(bindRequest("wg-phone"), connection: phoneConnection)
+    XCTAssertEqual(try ports(phoneConnection), [1997])
+    // An owner's grant on network/ssh opens it for that member
+    _ = security.grants.add(.key(phone.publicKey), .path("network/ssh"), by: "test")
+    XCTAssertEqual(try ports(phoneConnection), [22, 1997])
+
+    // Once the machine stops reporting SSH, the port closes again
+    api.deviceSSHPort = { _ in nil }
+    XCTAssertEqual(try ports(ownerConnection), [1997])
+  }
+
+  func testAHubMachineThatIsntADeviceOpensNoSSHPort() throws {
+    _ = try hubMachine()
+    api.deviceSSHPort = { _ in 22 }
+    let ownerConnection = connection(owner().publicKey)
+    _ = try bind(bindRequest("wg-owner"), ownerConnection)
+    XCTAssertEqual(try api.links(ownerConnection, coordinator: "x")["grants"]?.array?.first?["aToB"], [["protocol": "tcp", "port": 1997]])
   }
 
 }

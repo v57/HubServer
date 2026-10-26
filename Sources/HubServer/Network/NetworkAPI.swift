@@ -23,6 +23,8 @@ final class NetworkAPI {
   var onBindApprove: (HubConnection) -> Void = { _ in }
   /// Device names for member DNS names
   var deviceLabel: (String) -> String? = { _ in nil }
+  /// The SSH port a device reports in `capabilities.ssh`
+  var deviceSSHPort: (String) -> Int? = { _ in nil }
 
   private var consumedAttestations: [String: Date] = [:]
   /// Agents that hold grants per resource, which generation changes reach
@@ -549,6 +551,13 @@ final class NetworkAPI {
     guard resource.mode != "disabled", let key = connection.key else { return false }
     if isOwner(connection) || resource.ownerKey == key { return true }
     return security.grants.allowsShare(security.caller(connection.principal), resource.resourceId)
+  }
+
+  /// SSH to the hub's machine (the port its device reports in `capabilities.ssh`): owners, and callers an owner granted
+  /// the path `network/ssh`. The SSH server still signs them in on its own
+  func canUseHostSSH(_ connection: HubConnection) -> Bool {
+    guard connection.key != nil else { return false }
+    return isOwner(connection) || security.grants.allowsPath(security.caller(connection.principal), "network/ssh")
   }
 
   /// Grants a share policy stands for: hub → everyone, group → the group, keys → each key, private → none
