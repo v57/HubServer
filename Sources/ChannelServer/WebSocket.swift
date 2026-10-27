@@ -29,6 +29,11 @@ public final class WebSocketServer: ChannelTransport {
   public convenience init(_ address: ListenAddress, options: Options = Options()) {
     self.init(listener: NetworkStreamListener(address), options: options)
   }
+  #elseif canImport(Glibc)
+  /// POSIX sockets on `address`
+  public convenience init(_ address: ListenAddress, options: Options = Options()) {
+    self.init(listener: SocketStreamListener(address), options: options)
+  }
   #endif
 
   public func start(queue: DispatchQueue, accept: @escaping UpgradeHandler, ready: @escaping (Result<UInt16, Error>) -> Void) {

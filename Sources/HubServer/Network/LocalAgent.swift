@@ -108,7 +108,7 @@ enum LocalAgent {
       }
       let host = String(address[..<colon])
       var hints = addrinfo()
-      hints.ai_socktype = SOCK_STREAM
+      hints.ai_socktype = streamSocket
       var info: UnsafeMutablePointer<addrinfo>?
       guard getaddrinfo(host, String(port), &hints, &info) == 0, let first = info else { throw ChannelFailure("local agent unreachable") }
       defer { freeaddrinfo(info) }
@@ -120,7 +120,7 @@ enum LocalAgent {
       }
       return descriptor
     }
-    let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    let descriptor = socket(AF_UNIX, streamSocket, 0)
     guard descriptor >= 0 else { throw ChannelFailure("local agent unreachable") }
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
@@ -316,3 +316,10 @@ final class LocalAgentBindings {
     return .object(result)
   }
 }
+
+/// SOCK_STREAM as `socket` takes it: Glibc imports it as an enum
+#if canImport(Glibc)
+private let streamSocket = Int32(SOCK_STREAM.rawValue)
+#else
+private let streamSocket = SOCK_STREAM
+#endif

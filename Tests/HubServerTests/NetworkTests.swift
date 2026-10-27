@@ -2,6 +2,8 @@ import Foundation
 import XCTest
 #if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
 #endif
 @testable import HubServer
 

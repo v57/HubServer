@@ -257,7 +257,7 @@ public final class HubServer: @unchecked Sendable {
   }
 
   private func makeTransport(_ address: ListenAddress) -> ChannelTransport {
-    #if canImport(Network)
+    #if canImport(Network) || canImport(Glibc)
     WebSocketServer(address)
     #else
     fatalError("HubServer needs a ByteStreamListener on this platform")

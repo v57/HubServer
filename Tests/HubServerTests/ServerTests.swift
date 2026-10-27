@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 @testable import HubServer
 
@@ -294,7 +297,12 @@ final class NetworkServerTests: XCTestCase {
     let server = HubServer(configuration)
     let port = try await server.start()
     let hubKey = server.status.hubKey!
-    let helper = ServerTests()
+    #if canImport(Darwin)
+  let helper = ServerTests()
+  #else
+  // swift-corelibs-xctest's XCTestCase has no init()
+  let helper = ServerTests(name: "helper") { _ in }
+  #endif
     let owners = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
 
     // v57's coordinator until an owner sets another
@@ -358,7 +366,12 @@ final class PendingTests: XCTestCase {
   var hubKey = ""
   var caller: TestClient!
   var clients: [TestClient] = []
+  #if canImport(Darwin)
   let helper = ServerTests()
+  #else
+  // swift-corelibs-xctest's XCTestCase has no init()
+  let helper = ServerTests(name: "helper") { _ in }
+  #endif
 
   override func setUp() async throws {
     let owner = HubKeyPair()
