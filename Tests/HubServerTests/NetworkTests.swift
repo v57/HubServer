@@ -513,4 +513,35 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertEqual(try api.links(ownerConnection, coordinator: "x")["grants"]?.array?.first?["aToB"], [["protocol": "tcp", "port": 1997]])
   }
 
+  /// A member that isn't an owner finds the device sharing its internet and gets a grant for it, also once the hub has
+  /// dropped its profile (its app reconnected and hasn't registered again)
+  func testAMemberSeesAndUsesAGatewayWithoutItsProfile() throws {
+    let mac = owner()
+    let macConnection = connection(mac.publicKey, device: deviceA)
+    _ = try bind(bindRequest("wg-mac"), macConnection)
+    _ = try api.advertiseGateway(["endpoint": "192.168.0.10:51820", "capability": ["version": 1, "capability": "internet-gateway-v1",
+      "ipv4": true, "ipv6": false, "dns": true, "metered": false, "updatedAt": .string(isoNow())]], connection: macConnection)
+    let air = HubKeyPair()
+    _ = try api.registry.allocateAddresses("device:\(deviceB)")
+    _ = try bind(bindRequest("wg-air", kind: "join"), connection(air.publicKey, device: deviceB))
+    func grant(_ caller: HubConnection, key: String, wireGuardKey: String) throws -> JSON {
+      try api.issueGatewayGrant(["clientKey": .string(key), "clientWireGuardKey": .string(wireGuardKey), "gatewayKey": .string(mac.publicKey),
+        "ipv4": true, "ipv6": false, "dns": true], connection: caller)
+    }
+    for state in ["registered", "profile dropped"] {
+      if state == "profile dropped" { api.agents.unregisterProfile(air.publicKey) }
+      let caller = connection(air.publicKey, device: deviceB)
+      XCTAssertEqual(api.listGateways(caller).map { $0["key"]?.string }, [mac.publicKey], state)
+      XCTAssertTrue(api.listAgents(caller).contains { $0["key"]?.string == mac.publicKey }, state)
+      XCTAssertEqual(try grant(caller, key: air.publicKey, wireGuardKey: "wg-air")["clientWireGuardKey"], "wg-air", state)
+      XCTAssertEqual(code { try grant(caller, key: air.publicKey, wireGuardKey: "wg-other") }, "gateway_not_authorized", state)
+    }
+    // Another key on that device isn't its member, nor is a stranger
+    for other in [connection(HubKeyPair().publicKey, device: deviceB), connection(HubKeyPair().publicKey)] {
+      XCTAssertEqual(api.listGateways(other), [])
+      XCTAssertFalse(api.listAgents(other).contains { $0["key"]?.string == mac.publicKey })
+      XCTAssertEqual(code { try grant(other, key: other.key!, wireGuardKey: "wg-air") }, "unauthorized")
+    }
+  }
+
 }

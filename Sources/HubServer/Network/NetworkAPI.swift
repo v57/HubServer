@@ -416,8 +416,19 @@ final class NetworkAPI {
   }
 
   private func canUseGatewayAPI(_ connection: HubConnection) -> Bool {
-    guard let key = connection.key else { return false }
-    return isOwner(connection) || agents.profile(key) != nil
+    connection.key != nil && (isOwner(connection) || gatewayClient(connection) != nil)
+  }
+
+  /// The caller as a gateway client: its registered profile, or the member its device (or key) stays while the hub
+  /// has no profile for it, so a member whose app reconnected without registering again still uses a gateway. The
+  /// member must be the caller's own: the same agent key.
+  private func gatewayClient(_ connection: HubConnection) -> (key: String, wireGuardKey: String)? {
+    guard let key = connection.key else { return nil }
+    if let profile = agents.profile(key) { return (profile.key, profile.wireGuardKey) }
+    let device = connection.device ?? connection.certificate?.deviceId
+    guard let member = device.flatMap({ registry.members[deviceMember($0)] }) ?? registry.members[key],
+      (member.key ?? key) == key else { return nil }
+    return (key, member.wireGuardKey)
   }
 
   func listGateways(_ connection: HubConnection) -> [JSON] {
@@ -428,15 +439,14 @@ final class NetworkAPI {
   func listGatewayRevocations(_ connection: HubConnection) -> [JSON] {
     guard let key = connection.key else { return [] }
     let owner = isOwner(connection)
-    let profile = agents.profile(key)
-    guard profile != nil || owner else { return [] }
+    guard owner || gatewayClient(connection) != nil else { return [] }
     return gatewayRevocations.sorted { $0.key < $1.key }.compactMap { gatewayKey, revocation in
-      owner || gatewayKey == profile?.key || gatewayGrantAgents[gatewayKey]?.contains(key) == true ? revocation : nil
+      owner || gatewayKey == key || gatewayGrantAgents[gatewayKey]?.contains(key) == true ? revocation : nil
     }
   }
 
   func issueGatewayGrant(_ body: JSON?, connection: HubConnection) throws -> JSON {
-    let client = try authenticatedProfile(connection)
+    guard let client = gatewayClient(connection) else { throw networkError("unauthorized", "agent profile not registered") }
     guard client.key == body?["clientKey"]?.string, client.wireGuardKey == body?["clientWireGuardKey"]?.string else {
       throw networkError("gateway_not_authorized", "client binding does not match authenticated profile")
     }
@@ -664,12 +674,14 @@ final class NetworkAPI {
   }
 
   /// `network/agents/list`: owners and the hub host's agent see every member; others see the agents of shares they
-  /// can see, without WireGuard keys
+  /// can see and of the gateways they may use, without WireGuard keys
   func listAgents(_ connection: HubConnection) -> [JSON] {
     let localAgentKey = localAgent.machine?.key
     if isOwner(connection) || (connection.key != nil && connection.key == localAgentKey) { return listMembers() }
     var visible = Set(visibleProviders(connection).map(\.key))
     if let key = connection.key, agents.profile(key) != nil { visible.insert(key) }
+    // A device that shares its internet is listed for the members who may use it
+    if canUseGatewayAPI(connection) { visible.formUnion(gateways.keys) }
     return agents.listProfiles.filter { visible.contains($0.key) }.map { profile in
       var object = profile.json.object!
       object["wireGuardKey"] = ""
