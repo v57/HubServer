@@ -680,11 +680,13 @@ final class NetworkAPI {
     if isOwner(connection) || (connection.key != nil && connection.key == localAgentKey) { return listMembers() }
     var visible = Set(visibleProviders(connection).map(\.key))
     if let key = connection.key, agents.profile(key) != nil { visible.insert(key) }
-    // A device that shares its internet is listed for the members who may use it
-    if canUseGatewayAPI(connection) { visible.formUnion(gateways.keys) }
+    // A device that shares its internet is listed for the members who may use it, with the WireGuard key its gateway
+    // status already gives them: their app matches the two by it
+    let gatewayKeys = canUseGatewayAPI(connection) ? Set(gateways.keys) : []
+    visible.formUnion(gatewayKeys)
     return agents.listProfiles.filter { visible.contains($0.key) }.map { profile in
       var object = profile.json.object!
-      object["wireGuardKey"] = ""
+      if !gatewayKeys.contains(profile.key) { object["wireGuardKey"] = "" }
       return .object(object)
     }
   }

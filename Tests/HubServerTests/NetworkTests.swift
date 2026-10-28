@@ -532,7 +532,7 @@ final class NetworkAPITests: XCTestCase {
       if state == "profile dropped" { api.agents.unregisterProfile(air.publicKey) }
       let caller = connection(air.publicKey, device: deviceB)
       XCTAssertEqual(api.listGateways(caller).map { $0["key"]?.string }, [mac.publicKey], state)
-      XCTAssertTrue(api.listAgents(caller).contains { $0["key"]?.string == mac.publicKey }, state)
+      XCTAssertEqual(api.listAgents(caller).first { $0["key"]?.string == mac.publicKey }?["wireGuardKey"], "wg-mac", state)
       XCTAssertEqual(try grant(caller, key: air.publicKey, wireGuardKey: "wg-air")["clientWireGuardKey"], "wg-air", state)
       XCTAssertEqual(code { try grant(caller, key: air.publicKey, wireGuardKey: "wg-other") }, "gateway_not_authorized", state)
     }
