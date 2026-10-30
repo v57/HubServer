@@ -1,5 +1,7 @@
 // The routes of Channel/channel/tests/server.ts, served by ChannelServer, for Tests/interop/channel-interop.ts
 // Run: swift run channel-fixture [port]   (CHANNEL_TEST_PORT or 2049)
+// With CHANNEL_QUIC_P12 (a PKCS#12 file) and CHANNEL_QUIC_PASSWORD, also over QUIC on the same UDP port
+// (Tests/interop/channel-quic.test.ts).
 import ChannelServer
 import Foundation
 
@@ -114,11 +116,38 @@ queue.async {
     State(headers: request.channelHeaders)
   }) { result in
     switch result {
-    case .success(let port): print("listening on \(port)")
+    case .success(let port):
+      print("listening on \(port)")
+      listenQuic(port: port)
     case .failure(let error):
       print("listen failed: \(error)")
       exit(1)
     }
+  }
+}
+
+func listenQuic(port: UInt16) {
+  let environment = ProcessInfo.processInfo.environment
+  guard let path = environment["CHANNEL_QUIC_P12"] else { return }
+  guard #available(macOS 12, *) else {
+    print("quic listen failed: needs macOS 12")
+    exit(1)
+  }
+  do {
+    let server = try QUICServer(ListenAddress(host: "127.0.0.1", port: port),
+                                pkcs12: Data(contentsOf: URL(fileURLWithPath: path)),
+                                password: environment["CHANNEL_QUIC_PASSWORD"] ?? "")
+    router.listen(server, queue: queue, state: { request in State(headers: request.channelHeaders) }) { result in
+      switch result {
+      case .success(let port): print("quic listening on \(port)")
+      case .failure(let error):
+        print("quic listen failed: \(error)")
+        exit(1)
+      }
+    }
+  } catch {
+    print("quic listen failed: \(error)")
+    exit(1)
   }
 }
 dispatchMain()

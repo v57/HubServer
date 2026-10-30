@@ -94,20 +94,7 @@ final class NetworkStream: ByteStream {
     self.queue = queue
   }
 
-  var remoteAddress: String? {
-    guard case .hostPort(let host, _) = connection.endpoint else { return nil }
-    var text: String
-    switch host {
-    case .ipv4(let address): text = "\(address)"
-    case .ipv6(let address): text = "\(address)"
-    case .name(let name, _): text = name
-    @unknown default: text = "\(host)"
-    }
-    // Drop the interface scope (`fe80::1%en0`), and show IPv4-mapped addresses as IPv4
-    if let percent = text.firstIndex(of: "%") { text = String(text[..<percent]) }
-    if text.hasPrefix("::ffff:"), text.contains(".") { text = String(text.dropFirst(7)) }
-    return text
-  }
+  var remoteAddress: String? { ChannelServer.remoteAddress(of: connection.endpoint) }
 
   func start(onData: @escaping (Data) -> Void, onClose: @escaping () -> Void) {
     self.onData = onData
@@ -159,5 +146,21 @@ final class NetworkStream: ByteStream {
     onFinish?()
     onFinish = nil
   }
+}
+
+/// The IP address of a connection's remote endpoint, without the interface scope (`fe80::1%en0`), and IPv4-mapped
+/// addresses as IPv4
+func remoteAddress(of endpoint: NWEndpoint) -> String? {
+  guard case .hostPort(let host, _) = endpoint else { return nil }
+  var text: String
+  switch host {
+  case .ipv4(let address): text = "\(address)"
+  case .ipv6(let address): text = "\(address)"
+  case .name(let name, _): text = name
+  @unknown default: text = "\(host)"
+  }
+  if let percent = text.firstIndex(of: "%") { text = String(text[..<percent]) }
+  if text.hasPrefix("::ffff:"), text.contains(".") { text = String(text.dropFirst(7)) }
+  return text
 }
 #endif

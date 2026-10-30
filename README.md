@@ -72,6 +72,11 @@ await server.stop()                                      // closes connections, 
   (TCP). Apple platforms use Network.framework (`NetworkStreamListener`); Linux, Windows and Android ports
   (`~/Developer/v57/SwiftUI`) add a `ByteStreamListener` on sockets, or their own `ChannelTransport`, and swift-crypto
   in place of CryptoKit.
+- **QUIC:** ChannelServer's `QUICServer` (Apple platforms, macOS 12 / iOS 15 and later) serves Channel over QUIC
+  (`Channel/channel/docs/quic.md`) next to a `WebSocketServer`, with a `SecIdentity` or a PKCS#12 file (kept in memory,
+  so macOS 15 or later for that one). HubServer doesn't listen on it yet. Network.framework takes one connection per
+  client address and port, so a client must dial each connection from its own UDP socket, as channel TS, Go and
+  ChannelSwift do.
 
 ## What it implements
 
@@ -127,7 +132,7 @@ that runs next to the hub in a container. On iOS there is no machine agent: the 
 
 ```sh
 swift test                      # JSON, WebSocket, peer, vectors (Docs/Devices/vectors.json), security, pairing, an in-process hub
-swift build --product channel-fixture && bun test Tests/interop    # the channel TS client against ChannelServer
+swift build --product channel-fixture && bun test Tests/interop    # the channel TS client against ChannelServer, over WebSocket and QUIC
 Scripts/conformance.sh          # Core/hub-server's raw-protocol harness against hub-server-swift
 Scripts/sdk-live.sh             # the TS SDK and the Swift SDK's live suites against hub-server-swift
 ```
