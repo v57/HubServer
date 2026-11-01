@@ -4,11 +4,14 @@ import Foundation
 /// Peer link grants (hub-net-node's PROTOCOL.md, "Peer links"): the hub signs, for each member, a `hub` link to the
 /// hub's machine. With it the member reaches the hub over a direct WireGuard path the coordinator introduces, also
 /// from a network where it can't reach the hub itself. The machine reaches the member's own shares it may open through
-/// the same link. Devices check a grant against the hub key they pinned and decide on their own; the coordinator only
-/// forwards it.
+/// the same link. A member also gets a `share` link to each other member whose device fronts a share it may open (an
+/// iPad watching an iPhone's camera), opening those ports there and nothing back. Devices check a grant against the hub
+/// key they pinned and decide on their own; the coordinator only forwards it.
 extension NetworkAPI {
   /// A grant lasts a month; the hub issues it again once half of that has passed
   static let peerLinkLifetime: TimeInterval = 30 * 24 * 3600
+  /// `share` links a member gets at most: a device has 16 links (hub-net-node's PROTOCOL.md), one of them its hub link
+  static let maxShareLinks = 15
 
   /// `network/links`: the caller's grants, the coordinator to meet the other side at, and whether the caller is the
   /// hub's machine (it accepts members' links rather than opening one)
@@ -17,8 +20,11 @@ extension NetworkAPI {
     let host = hubHostProfile
     var grants: [JSON] = []
     if let host, host.key != caller.key {
-      grants.append(peerLinkGrant(purpose: "hub", member: caller, host: host, ports: hostSharePorts(host, connection),
+      grants.append(peerLinkGrant(purpose: "hub", a: caller, b: host, ports: hostSharePorts(host, connection),
         back: memberSharePorts(caller, host: host)))
+      for (provider, ports) in otherMemberSharePorts(caller, host: host, connection) {
+        grants.append(peerLinkGrant(purpose: "share", a: caller, b: provider, ports: ports, back: []))
+      }
     }
     return [
       "version": .int(NetworkFoundation.wireVersion), "hubKey": .string(hubKey), "hubNetworkId": .string(hubNetworkId),
@@ -59,15 +65,36 @@ extension NetworkAPI {
     return ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }
   }
 
-  /// The signed `hub` grant between a member and the hub's machine: the member routes the machine's overlay addresses
-  /// through it and may open `ports` there (the hub's and its shares'), the machine routes the member's addresses back
-  /// and may open `back` on the member (its shares)
+  /// The other members whose devices front shares the caller may open, with those ports, for at most `maxShareLinks`
+  /// of them (a device has 16 links, one of them its hub link). The hub's machine isn't one of them: the hub link
+  /// reaches it, and it reaches the members' shares through their hub links
+  private func otherMemberSharePorts(
+    _ caller: AgentProfile, host: AgentProfile, _ connection: HubConnection
+  ) -> [(AgentProfile, [(protocol: String, port: Int)])] {
+    var byProvider: [String: [String: (protocol: String, port: Int)]] = [:]
+    for provider in agents.listProviders where provider.key != caller.key && provider.key != host.key {
+      guard let resource = registry.resource(provider.resourceId), canAccessShare(resource, connection) else { continue }
+      byProvider[provider.key, default: [:]]["\(provider.protocol)/\(provider.port)"] = (provider.protocol, provider.port)
+    }
+    var links: [(AgentProfile, [(protocol: String, port: Int)])] = []
+    for key in byProvider.keys.sorted() where links.count < Self.maxShareLinks {
+      guard let profile = agents.profile(key), profile.wireGuardKey != caller.wireGuardKey,
+        !profile.overlayAddresses.isEmpty, let ports = byProvider[key]
+      else { continue }
+      links.append((profile, ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }))
+    }
+    return links
+  }
+
+  /// A signed grant between `a` and `b`: a `hub` grant joins a member (`a`) and the hub's machine (`b`), a `share` grant
+  /// a member (`a`) and another member fronting shares it may open (`b`). `a` routes `b`'s overlay addresses through
+  /// `b` and may open `ports` there, `b` routes `a`'s addresses back and may open `back` on `a`
   private func peerLinkGrant(
-    purpose: String, member: AgentProfile, host: AgentProfile, ports: [(protocol: String, port: Int)],
+    purpose: String, a: AgentProfile, b: AgentProfile, ports: [(protocol: String, port: Int)],
     back: [(protocol: String, port: Int)]
   ) -> JSON {
-    let sides = [purpose, member.key, member.wireGuardKey, host.key, host.wireGuardKey]
-      + member.overlayAddresses + host.overlayAddresses + ports.map { "\($0.protocol)/\($0.port)" }
+    let sides = [purpose, a.key, a.wireGuardKey, b.key, b.wireGuardKey]
+      + a.overlayAddresses + b.overlayAddresses + ports.map { "\($0.protocol)/\($0.port)" }
       + back.map { "<\($0.protocol)/\($0.port)" }
     let cacheKey = sides.joined(separator: "\u{0}")
     if let cached = peerLinkGrants[cacheKey], cached.expiresAt.timeIntervalSinceNow > Self.peerLinkLifetime / 2 {
@@ -81,8 +108,8 @@ extension NetworkAPI {
     }
     let grant = signed(.peerLink, [
       "version": .int(NetworkFoundation.wireVersion), "grantId": .string(newId()), "hubKey": .string(hubKey),
-      "hubNetworkId": .string(hubNetworkId), "purpose": .string(purpose), "a": side(member), "b": side(host),
-      "aViaB": JSON(host.overlayAddresses.map(Self.hostRoute)), "bViaA": JSON(member.overlayAddresses.map(Self.hostRoute)),
+      "hubNetworkId": .string(hubNetworkId), "purpose": .string(purpose), "a": side(a), "b": side(b),
+      "aViaB": JSON(b.overlayAddresses.map(Self.hostRoute)), "bViaA": JSON(a.overlayAddresses.map(Self.hostRoute)),
       "aToB": .array(ports.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }), "bToA": .array(back.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }),
       "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(expiresAt)), "signature": "",
     ])

@@ -522,6 +522,101 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertNotEqual(closed["grantId"], grant["grantId"])
   }
 
+  func testMembersGetAShareLinkToEachOtherMemberFrontingAShareTheyMayOpen() throws {
+    let (machine, machineConnection) = try hubMachine()
+    func member(_ wireGuardKey: String, _ key: HubKeyPair = HubKeyPair()) throws -> (key: HubKeyPair, connection: HubConnection) {
+      let memberConnection = connection(key.publicKey)
+      _ = try api.registerProfile(bindRequest(wireGuardKey), connection: memberConnection)
+      return (key, memberConnection)
+    }
+    func shares(_ device: HubKeyPair, _ list: [(String, Int, JSON)]) -> [JSON] {
+      list.map { name, port, policy in
+        let now = Date()
+        var attestation: JSON = ["version": 1, "attestationId": .string(UUID().uuidString), "serviceKey": .string(device.publicKey),
+          "key": .string(device.publicKey), "shareName": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+          "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(now.addingTimeInterval(60))), "signature": ""]
+        var object = attestation.object!
+        object["signature"] = .string(NetworkSignature.sign(.agentAttestation, attestation, key: device))
+        attestation = .object(object)
+        return ["version": 1, "name": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+          "policy": policy, "attestation": attestation]
+      }
+    }
+    func shareGrants(_ memberConnection: HubConnection) throws -> [JSON] {
+      try XCTUnwrap(api.links(memberConnection, coordinator: "x")["grants"]?.array).filter { $0["purpose"] == "share" }
+    }
+
+    let (phone, phoneConnection) = try member("wg-phone")
+    let (tablet, tabletConnection) = try member("wg-tablet")
+    XCTAssertEqual(try shareGrants(tabletConnection), [])
+    // A camera on the phone everyone may open, and notes only its owner may
+    _ = try api.replaceShares(shares(phone, [("Camera: Phone", 50000, ["mode": "hub"]), ("notes", 9000, ["mode": "private"])]),
+      connection: phoneConnection)
+
+    // The tablet opens the camera's port on the phone and nothing comes back
+    let grants = try shareGrants(tabletConnection)
+    XCTAssertEqual(grants.count, 1)
+    let grant = try XCTUnwrap(grants.first)
+    XCTAssertEqual(grant["a"]?["key"]?.string, tablet.publicKey)
+    XCTAssertEqual(grant["a"]?["wireGuardKey"], "wg-tablet")
+    XCTAssertEqual(grant["b"]?["key"]?.string, phone.publicKey)
+    XCTAssertEqual(grant["b"]?["wireGuardKey"], "wg-phone")
+    XCTAssertEqual(grant["aToB"], [["protocol": "tcp", "port": 50000]])
+    XCTAssertEqual(grant["bToA"], [])
+    XCTAssertEqual(grant["aViaB"]?.strings, try XCTUnwrap(grant["b"]?["addresses"]?.strings).map(NetworkAPI.hostRoute))
+    XCTAssertEqual(grant["bViaA"]?.strings, try XCTUnwrap(grant["a"]?["addresses"]?.strings).map(NetworkAPI.hostRoute))
+    XCTAssertTrue(NetworkSignature.verify(.peerLink, grant, publicKey: api.registry.hubKey))
+    XCTAssertEqual(try shareGrants(tabletConnection).first?["grantId"], grant["grantId"])
+    // An owner opens both; the phone has no share link to itself; the machine reaches the phone through its hub link
+    let (_, ownerConnection) = try member("wg-owner", owner())
+    XCTAssertEqual(try shareGrants(ownerConnection).first?["aToB"]?.array?.compactMap { $0["port"]?.int }, [9000, 50000])
+    XCTAssertEqual(try shareGrants(phoneConnection), [])
+    XCTAssertEqual(try api.links(machineConnection, coordinator: "x")["grants"], [])
+
+    // The machine's own shares stay on the hub link
+    _ = try api.replaceShares(shares(machine, [("web", 8080, ["mode": "hub"])]), connection: machineConnection)
+    XCTAssertEqual(try shareGrants(tabletConnection).map { $0["b"]?["key"]?.string }, [phone.publicKey])
+
+    // Both members fronting shares: each gets its own link to the other
+    _ = try api.replaceShares(shares(tablet, [("Camera: Tablet", 50001, ["mode": "hub"])]), connection: tabletConnection)
+    let back = try shareGrants(phoneConnection)
+    XCTAssertEqual(back.map { $0["a"]?["key"]?.string }, [phone.publicKey])
+    XCTAssertEqual(back.map { $0["b"]?["key"]?.string }, [tablet.publicKey])
+    XCTAssertEqual(back.first?["aToB"], [["protocol": "tcp", "port": 50001]])
+
+    // Once the phone stops sharing, the tablet's link to it is gone
+    _ = try api.replaceShares([], connection: phoneConnection)
+    XCTAssertEqual(try shareGrants(tabletConnection), [])
+  }
+
+  func testAMemberGetsAtMost15ShareLinks() throws {
+    _ = try hubMachine()
+    func member(_ wireGuardKey: String) throws -> (key: HubKeyPair, connection: HubConnection) {
+      let key = HubKeyPair()
+      let memberConnection = connection(key.publicKey)
+      _ = try api.registerProfile(bindRequest(wireGuardKey), connection: memberConnection)
+      return (key, memberConnection)
+    }
+    let (_, viewerConnection) = try member("wg-viewer")
+    for index in 0..<20 {
+      let (camera, cameraConnection) = try member("wg-camera-\(index)")
+      let now = Date()
+      var attestation: JSON = ["version": 1, "attestationId": .string(UUID().uuidString), "serviceKey": .string(camera.publicKey),
+        "key": .string(camera.publicKey), "shareName": .string("Camera \(index)"), "protocol": "tcp",
+        "target": ["host": "127.0.0.1", "port": 50000], "issuedAt": .string(isoDate(now)),
+        "expiresAt": .string(isoDate(now.addingTimeInterval(60))), "signature": ""]
+      var object = attestation.object!
+      object["signature"] = .string(NetworkSignature.sign(.agentAttestation, attestation, key: camera))
+      attestation = .object(object)
+      _ = try api.replaceShares([["version": 1, "name": .string("Camera \(index)"), "protocol": "tcp",
+        "target": ["host": "127.0.0.1", "port": 50000], "policy": ["mode": "hub"], "attestation": attestation]],
+        connection: cameraConnection)
+    }
+    let grants = try XCTUnwrap(api.links(viewerConnection, coordinator: "x")["grants"]?.array)
+    XCTAssertEqual(grants.filter { $0["purpose"] == "hub" }.count, 1)
+    XCTAssertEqual(grants.filter { $0["purpose"] == "share" }.count, 15)
+  }
+
   func testTheHubLinkOpensTheMachinesSSHPortForOwnersAndCallersGrantedNetworkSSH() throws {
     _ = try hubMachine(device: "mac")
     api.deviceSSHPort = { $0 == "mac" ? 22 : nil }
