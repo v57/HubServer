@@ -121,9 +121,14 @@ final class NetworkStream: ByteStream {
     }
   }
 
+  private(set) var bufferedAmount = 0
+
   func write(_ data: Data) {
     guard !isClosed else { return }
-    connection.send(content: data, completion: .contentProcessed { _ in })
+    bufferedAmount += data.count
+    connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+      self?.bufferedAmount -= data.count
+    })
   }
 
   func close() {

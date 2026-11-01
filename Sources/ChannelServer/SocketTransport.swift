@@ -162,6 +162,8 @@ final class SocketStream: ByteStream {
     }
   }
 
+  var bufferedAmount: Int { pending.count }
+
   func write(_ data: Data) {
     guard !isClosing, !isFinished else { return }
     pending.append(data)

@@ -65,8 +65,16 @@ public protocol ByteStream: AnyObject {
   /// Starts reading. Both callbacks run on the listener's queue; `onClose` runs once.
   func start(onData: @escaping (Data) -> Void, onClose: @escaping () -> Void)
   func write(_ data: Data)
+  /// Bytes written but not handed to the network yet: a stream of live data (video) skips what a slow peer can't
+  /// take instead of queueing it. Called on the listener's queue.
+  var bufferedAmount: Int { get }
   /// Closes after the pending writes
   func close()
+}
+
+extension ByteStream {
+  /// A stream that doesn't count its queue: never behind
+  public var bufferedAmount: Int { 0 }
 }
 
 /// Accepts TCP connections
@@ -102,4 +110,14 @@ public struct ListenAddress: Sendable, Equatable, CustomStringConvertible {
     guard let host else { return "\(port)" }
     return host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
   }
+}
+
+/// Plain TCP on `address` with this platform's listener: Network.framework on Apple platforms, POSIX sockets where
+/// it's missing
+public func makeByteStreamListener(_ address: ListenAddress) -> ByteStreamListener {
+  #if canImport(Network)
+  NetworkStreamListener(address)
+  #else
+  SocketStreamListener(address)
+  #endif
 }
