@@ -481,6 +481,47 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertNotEqual(closed["grantId"], grant["grantId"])
   }
 
+  func testTheHubLinkOpensTheMembersOwnSharesToTheHubsMachine() throws {
+    _ = try hubMachine()
+    api.hubPort = 1997
+    func member(_ wireGuardKey: String) throws -> (key: HubKeyPair, connection: HubConnection) {
+      let key = HubKeyPair()
+      let memberConnection = connection(key.publicKey)
+      _ = try api.registerProfile(bindRequest(wireGuardKey), connection: memberConnection)
+      return (key, memberConnection)
+    }
+    // A camera on a phone: the phone's app is the service and its own agent
+    let (phone, phoneConnection) = try member("wg-phone")
+    func share(_ name: String, _ port: Int, _ policy: JSON) -> JSON {
+      let now = Date()
+      var attestation: JSON = ["version": 1, "attestationId": .string(UUID().uuidString), "serviceKey": .string(phone.publicKey),
+        "key": .string(phone.publicKey), "shareName": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+        "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(now.addingTimeInterval(60))), "signature": ""]
+      var object = attestation.object!
+      object["signature"] = .string(NetworkSignature.sign(.agentAttestation, attestation, key: phone))
+      attestation = .object(object)
+      return ["version": 1, "name": .string(name), "protocol": "tcp", "target": ["host": "127.0.0.1", "port": .int(port)],
+        "policy": policy, "attestation": attestation]
+    }
+    XCTAssertEqual(try api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first?["bToA"], [])
+    _ = try api.replaceShares([share("Camera: Phone", 50000, ["mode": "hub"]), share("notes", 9000, ["mode": "private"])],
+      connection: phoneConnection)
+
+    // The machine (an owner) may open both on the phone; the phone still opens only the hub's port on the machine
+    let grant = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first)
+    XCTAssertEqual(grant["bToA"], [["protocol": "tcp", "port": 9000], ["protocol": "tcp", "port": 50000]])
+    XCTAssertEqual(grant["aToB"], [["protocol": "tcp", "port": 1997]])
+    // Another member's link carries none of the phone's shares
+    let (_, tabletConnection) = try member("wg-tablet")
+    XCTAssertEqual(try api.links(tabletConnection, coordinator: "x")["grants"]?.array?.first?["bToA"], [])
+
+    // Once the phone stops sharing, its next grant closes them again
+    _ = try api.replaceShares([], connection: phoneConnection)
+    let closed = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["grants"]?.array?.first)
+    XCTAssertEqual(closed["bToA"], [])
+    XCTAssertNotEqual(closed["grantId"], grant["grantId"])
+  }
+
   func testTheHubLinkOpensTheMachinesSSHPortForOwnersAndCallersGrantedNetworkSSH() throws {
     _ = try hubMachine(device: "mac")
     api.deviceSSHPort = { $0 == "mac" ? 22 : nil }

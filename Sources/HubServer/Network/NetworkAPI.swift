@@ -558,9 +558,13 @@ final class NetworkAPI {
   /// Share access is a grant (protocol.md section 9): owners and the share's own service always, unless the share
   /// is disabled; anyone else needs a `{ share }` grant
   func canAccessShare(_ resource: NetworkResource, _ connection: HubConnection) -> Bool {
-    guard resource.mode != "disabled", let key = connection.key else { return false }
-    if isOwner(connection) || resource.ownerKey == key { return true }
-    return security.grants.allowsShare(security.caller(connection.principal), resource.resourceId)
+    canAccessShare(resource, connection.principal)
+  }
+
+  func canAccessShare(_ resource: NetworkResource, _ principal: Principal) -> Bool {
+    guard resource.mode != "disabled", let key = principal.key else { return false }
+    if security.isOwner(principal) || resource.ownerKey == key { return true }
+    return security.grants.allowsShare(security.caller(principal), resource.resourceId)
   }
 
   /// SSH to the hub's machine (the port its device reports in `capabilities.ssh`): owners, and callers an owner granted

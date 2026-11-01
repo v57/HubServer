@@ -3,8 +3,9 @@ import Foundation
 
 /// Peer link grants (hub-net-node's PROTOCOL.md, "Peer links"): the hub signs, for each member, a `hub` link to the
 /// hub's machine. With it the member reaches the hub over a direct WireGuard path the coordinator introduces, also
-/// from a network where it can't reach the hub itself. Devices check a grant against the hub key they pinned and decide
-/// on their own; the coordinator only forwards it.
+/// from a network where it can't reach the hub itself. The machine reaches the member's own shares it may open through
+/// the same link. Devices check a grant against the hub key they pinned and decide on their own; the coordinator only
+/// forwards it.
 extension NetworkAPI {
   /// A grant lasts a month; the hub issues it again once half of that has passed
   static let peerLinkLifetime: TimeInterval = 30 * 24 * 3600
@@ -16,7 +17,8 @@ extension NetworkAPI {
     let host = hubHostProfile
     var grants: [JSON] = []
     if let host, host.key != caller.key {
-      grants.append(peerLinkGrant(purpose: "hub", member: caller, host: host, ports: hostSharePorts(host, connection)))
+      grants.append(peerLinkGrant(purpose: "hub", member: caller, host: host, ports: hostSharePorts(host, connection),
+        back: memberSharePorts(caller, host: host)))
     }
     return [
       "version": .int(NetworkFoundation.wireVersion), "hubKey": .string(hubKey), "hubNetworkId": .string(hubNetworkId),
@@ -45,11 +47,28 @@ extension NetworkAPI {
     return ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }
   }
 
+  /// The ports of the shares the member's device fronts that the hub's machine may open: a camera on a phone, watched
+  /// from the hub's Mac. Other members don't reach them, as they have no link to the member
+  private func memberSharePorts(_ member: AgentProfile, host: AgentProfile) -> [(protocol: String, port: Int)] {
+    var ports: [String: (protocol: String, port: Int)] = [:]
+    let machine = Principal(key: host.key, device: host.device)
+    for provider in agents.listProviders where provider.key == member.key {
+      guard let resource = registry.resource(provider.resourceId), canAccessShare(resource, machine) else { continue }
+      ports["\(provider.protocol)/\(provider.port)"] = (provider.protocol, provider.port)
+    }
+    return ports.values.sorted { $0.port != $1.port ? $0.port < $1.port : $0.protocol < $1.protocol }
+  }
+
   /// The signed `hub` grant between a member and the hub's machine: the member routes the machine's overlay addresses
   /// through it and may open `ports` there (the hub's and its shares'), the machine routes the member's addresses back
-  private func peerLinkGrant(purpose: String, member: AgentProfile, host: AgentProfile, ports: [(protocol: String, port: Int)]) -> JSON {
+  /// and may open `back` on the member (its shares)
+  private func peerLinkGrant(
+    purpose: String, member: AgentProfile, host: AgentProfile, ports: [(protocol: String, port: Int)],
+    back: [(protocol: String, port: Int)]
+  ) -> JSON {
     let sides = [purpose, member.key, member.wireGuardKey, host.key, host.wireGuardKey]
       + member.overlayAddresses + host.overlayAddresses + ports.map { "\($0.protocol)/\($0.port)" }
+      + back.map { "<\($0.protocol)/\($0.port)" }
     let cacheKey = sides.joined(separator: "\u{0}")
     if let cached = peerLinkGrants[cacheKey], cached.expiresAt.timeIntervalSinceNow > Self.peerLinkLifetime / 2 {
       return cached.grant
@@ -64,7 +83,7 @@ extension NetworkAPI {
       "version": .int(NetworkFoundation.wireVersion), "grantId": .string(newId()), "hubKey": .string(hubKey),
       "hubNetworkId": .string(hubNetworkId), "purpose": .string(purpose), "a": side(member), "b": side(host),
       "aViaB": JSON(host.overlayAddresses.map(Self.hostRoute)), "bViaA": JSON(member.overlayAddresses.map(Self.hostRoute)),
-      "aToB": .array(ports.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }), "bToA": [],
+      "aToB": .array(ports.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }), "bToA": .array(back.map { ["protocol": .string($0.protocol), "port": .int($0.port)] }),
       "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(expiresAt)), "signature": "",
     ])
     peerLinkGrants[cacheKey] = (grant, expiresAt)
