@@ -26,10 +26,12 @@ extension NetworkAPI {
         grants.append(peerLinkGrant(purpose: "share", a: caller, b: provider, ports: ports, back: []))
       }
     }
-    return [
+    var state: JSONObject = [
       "version": .int(NetworkFoundation.wireVersion), "hubKey": .string(hubKey), "hubNetworkId": .string(hubNetworkId),
       "coordinator": .string(coordinator), "hubHost": .bool(host?.key == caller.key), "grants": .array(grants),
     ]
+    if !registry.presenceSecret.isEmpty { state["presenceSecret"] = .string(registry.presenceSecret) }
+    return .object(state)
   }
 
   /// The profile of the agent bound as the hub's own (the machine agent, or the Hub app on that machine), while it's

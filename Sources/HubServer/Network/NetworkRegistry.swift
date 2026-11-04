@@ -179,6 +179,10 @@ final class NetworkRegistry {
   static let releasedHold: TimeInterval = 24 * 60 * 60
 
   private(set) var hubNetworkId = ""
+  /// What this Hub shares with its members so the coordinator says nothing about them to anyone else: a device
+  /// registers tags derived from it, and an opener shows a proof derived from it. Base64; empty only for a corrupt
+  /// registry.
+  private(set) var presenceSecret = ""
   private(set) var hubKey = ""
   var nextIPv4 = OverlayAddress(ip: NetworkFoundation.ipv4First)!
   var lastIPv4 = OverlayAddress(ip: NetworkFoundation.ipv4Last)!
@@ -211,6 +215,7 @@ final class NetworkRegistry {
       guard let object = json.object else { throw ChannelFailure("not an object") }
       extra = object
       hubNetworkId = object["hubNetworkId"]?.string ?? ""
+      presenceSecret = object["presenceSecret"]?.string ?? ""
       hubKey = object["hubKey"]?.string ?? ""
       func address(_ key: String, _ fallback: OverlayAddress) -> OverlayAddress {
         object[key]?.string.flatMap(OverlayAddress.init(decimal:)) ?? fallback
@@ -254,6 +259,10 @@ final class NetworkRegistry {
       hubNetworkId = newId()
       needsWrite = true
     }
+    if presenceSecret.isEmpty {
+      presenceSecret = Data(HubCrypto.randomBytes(32)).base64EncodedString()
+      needsWrite = true
+    }
     if needsWrite { store.writeNow() }
   }
 
@@ -261,6 +270,7 @@ final class NetworkRegistry {
     var object = extra
     object["schemaVersion"] = .int(NetworkRegistry.schemaVersion)
     object["hubNetworkId"] = .string(hubNetworkId)
+    object["presenceSecret"] = .string(presenceSecret)
     object["hubKey"] = .string(hubKey)
     object["nextIPv4"] = .string(nextIPv4.decimal)
     object["lastIPv4"] = .string(lastIPv4.decimal)

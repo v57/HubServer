@@ -444,6 +444,16 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertEqual(code { try self.api.links(stranger, coordinator: "x") }, "unauthorized")
   }
 
+  func testMembersGetThePresenceSecret() throws {
+    let phone = owner()
+    let phoneConnection = connection(phone.publicKey)
+    _ = try bind(bindRequest("wg-phone"), phoneConnection)
+    let secret = try XCTUnwrap(api.links(phoneConnection, coordinator: "x")["presenceSecret"]?.string)
+    XCTAssertEqual(Data(base64Encoded: secret)?.count, 32)
+    XCTAssertEqual(api.registry.presenceSecret, secret)
+    XCTAssertThrowsError(try api.links(connection(owner().publicKey), coordinator: "x"))
+  }
+
   func testTheHubLinkOpensThePortsOfTheMachinesSharesTheMemberMayOpen() throws {
     let (machine, _) = try hubMachine()
     let service = HubKeyPair()
