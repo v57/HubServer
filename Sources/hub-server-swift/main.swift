@@ -12,8 +12,7 @@ let help = """
     --data <directory>     where the hub keeps its key and stores (default ./data)
     --owner <key>          trust this key as an owner (env HUBOWNER)
     --launcher <key>       let this key host launcher/* (env HUBLAUNCHER)
-    --local                local mode: 127.0.0.1 only, default-allow, the launcher key is an owner, no pairing
-                           (env HUB_MODE=local)
+    --local                local mode: 127.0.0.1 only, default-allow (env HUB_MODE=local)
     --net-agent <endpoint> where this host's Hub Network agent proves itself: its Unix socket, or tcp://host:port
                            when it runs next to the hub in a container (env HUB_NET_AGENT_SOCKET)
     --pair                 write a new pairing code to the data directory, print it and exit; a running hub on that

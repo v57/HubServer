@@ -247,3 +247,77 @@ final class DeviceStoreTests: XCTestCase {
     XCTAssertFalse(first["safetyCode"]?.string == offline(a.publicKey) && second["safetyCode"]?.string == offline(b.publicKey))
   }
 }
+
+/// The copies themselves; hub-server's conformance harness runs the rest (protocol.md section 14) from outside
+final class ChildDeviceTests: XCTestCase {
+  // Kept for a save still queued when the test ends
+  private var storage: Storage?
+  private var grantStore: GrantStore?
+  private func store() throws -> GrantStore {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let storage = Storage(directory: directory, queue: .main, log: { _ in })
+    let grants = GrantStore(storage: storage)
+    self.storage = storage
+    grantStore = grants
+    return grants
+  }
+
+  func testAttachVector() throws {
+    let vectors = try JSON.parse(Data(contentsOf: Bundle.module.url(forResource: "device-vectors", withExtension: "json", subdirectory: "Fixtures")!))
+    let attach = vectors["attach"]!
+    let signed = attachSignedData(hubKey: attach["hubKey"]!.string!, parentKey: attach["parentKey"]!.string!, childKey: attach["childKey"]!.string!, at: attach["at"]!.int!)
+    XCTAssertEqual(signed, attach["signedData"]!.string!)
+    XCTAssertTrue(HubCrypto.verify(signature: attach["signature"]!.string!, message: signed, spki: attach["parentKey"]!.string!))
+  }
+
+  func testCopiesFollowTheChainAndFireTheChange() throws {
+    let grants = try store()
+    var children = ["parent": ["child"], "child": ["grandchild"]]
+    grants.chain = { children[$0] ?? [] }
+    var changed: [Grant] = []
+    grants.onChange = { changed += $0 }
+    func held(_ device: String) -> [Grant] { grants.grants.filter { $0.subject == .device(device) } }
+
+    let source = grants.add(.device("parent"), .path("a/b"), by: "owner")
+    XCTAssertTrue(held("child").isEmpty, "not linked yet")
+    changed = []
+    try grants.setLinked(id: source.id, true)
+    XCTAssertEqual(held("child").first?.copyOf, source.id)
+    XCTAssertEqual(held("grandchild").first?.copyOf, source.id)
+    XCTAssertTrue(changed.contains { $0.subject == .device("grandchild") }, "the change fires for copies")
+
+    // A loop in what the registry says can't run forever, and a device doesn't get its own grant back
+    children["grandchild"] = ["parent"]
+    grants.settleCopies()
+    XCTAssertEqual(held("parent").count, 1)
+    children["grandchild"] = nil
+
+    // A link going takes what passed through it
+    children["parent"] = []
+    grants.settleCopies()
+    XCTAssertTrue(held("child").isEmpty)
+    XCTAssertTrue(held("grandchild").isEmpty)
+    children["parent"] = ["child"]
+    grants.settleCopies()
+
+    // The owner giving what a child has by copy makes it direct, keeping its id
+    let copy = held("child")[0]
+    let direct = grants.add(.device("child"), .path("a/b"), by: "owner")
+    XCTAssertEqual(direct.id, copy.id)
+    XCTAssertNil(direct.copyOf)
+    XCTAssertThrowsError(try grants.setLinked(id: held("grandchild")[0].id, true))
+    changed = []
+    _ = grants.remove(id: source.id)
+    XCTAssertEqual(held("child").map(\.id), [copy.id])
+    XCTAssertTrue(held("grandchild").isEmpty)
+    XCTAssertTrue(changed.contains { $0.subject == .device("grandchild") })
+
+    // A group can't link
+    let group = grants.add(.group("owners"), .path("c"), by: "owner")
+    XCTAssertThrowsError(try grants.setLinked(id: group.id, true))
+    // What's stored says what each one is
+    let stored = grants.store.encode()["grants"]!.array!
+    XCTAssertFalse(stored.contains { $0["id"]?.string == copy.id && $0["copyOf"] != nil })
+  }
+}

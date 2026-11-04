@@ -21,6 +21,8 @@ final class HubConnection {
   var instance: String?
   /// A valid certificate, also from a pending device
   var certificate: Certificate?
+  /// `hub/device/attach/ask` from a device with no row yet: it goes on the row when that's made
+  var attachAsk: AttachAsk?
   var isOpen = false
   /// Its paths take no new calls (`hub/service/update { draining: true }`); running calls go on
   var draining = false

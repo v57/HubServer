@@ -19,12 +19,12 @@ public final class HubServer: @unchecked Sendable {
     public var key: HubKeyPair?
     /// 1997 on every interface by default. Local mode always listens on 127.0.0.1.
     public var listen = ListenAddress(port: 1997)
-    /// Local mode (protocol.md section 12): 127.0.0.1 only, `default-allow`, the launcher key is an owner, no pairing.
-    /// Nothing of it is stored.
+    /// Local mode (protocol.md section 12): 127.0.0.1 only, `default-allow`, not stored. The first owner pairs like
+    /// anywhere.
     public var local = false
     /// Service or device SPKIs added to the owners group at start (`--owner`, `HUBOWNER`)
     public var owners: [String] = []
-    /// The launcher key (`HUBLAUNCHER`): may host `launcher/*`, its device is approved at once
+    /// The launcher key (`HUBLAUNCHER`): may host and call `launcher/*`, its device is approved at once. It's no owner.
     public var launcherKey: String?
     /// SPKI of this machine's device key. The hub enrols it as its own, approved device with the hub key as its
     /// service. `nil`: the hub has no device.
@@ -215,10 +215,9 @@ public final class HubServer: @unchecked Sendable {
     }
   }
 
-  /// A new pairing code replacing the old one (owners do this with `hub/pair/new`). Not in local mode.
+  /// A new pairing code replacing the old one (owners do this with `hub/pair/new`).
   public func newPairingCode() async throws -> PairingCode {
     let hub = try await running()
-    guard !configuration.local else { throw ChannelFailure("no pairing in local mode") }
     let code = hub.pairing.queue.sync { hub.pairing.create() }
     update { $0.pairingCode = code }
     queue.async { hub.announce(code) }
@@ -282,7 +281,7 @@ public final class HubServer: @unchecked Sendable {
 
   private func refreshStatus(running: Bool) {
     guard let hub else { return }
-    let pairingCode = configuration.local ? nil : hub.pairing.displayed
+    let pairingCode = hub.pairing.displayed
     update { status in
       if running { status.state = .running }
       status.hubKey = hub.hubKey

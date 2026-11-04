@@ -27,7 +27,7 @@ swift run hub-server-swift --port 1997
 | `--data <directory>` | where the hub keeps its key and stores (default `./data`, like hub-server) |
 | `--owner <key>` | trust this service or device SPKI as an owner (env `HUBOWNER`) |
 | `--launcher <key>` | let this key host `launcher/*` and enrol its device at once (env `HUBLAUNCHER`) |
-| `--local` | local mode: 127.0.0.1 only, `default-allow`, the launcher key is an owner, no pairing (env `HUB_MODE=local`) |
+| `--local` | local mode: 127.0.0.1 only, `default-allow`, the first owner pairs as anywhere (env `HUB_MODE=local`) |
 | `--pair` | write a new pairing code to the data directory, print it and exit; a hub running on it takes the code at once |
 
 The hub's own device key is `HUB_DEVICE_KEY`, else `~/.hub/device.key` (created if missing). A hub without owners

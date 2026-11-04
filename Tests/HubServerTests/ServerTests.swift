@@ -282,13 +282,15 @@ final class ServerTests: XCTestCase {
     configuration.log = { _ in }
     let server = HubServer(configuration)
     let port = try await server.start()
-    XCTAssertNil(server.status.pairingCode)
+    // The first owner pairs: the launcher's key isn't one
+    XCTAssertNotNil(server.status.pairingCode)
     let client = TestClient(port: port, headers: try await auth(launcher, hubKey: server.status.hubKey!, port: port))
     let info = try await client.post("hub/info")
     XCTAssertEqual(info?["mode"], "default-allow")
-    // The launcher is an owner without being stored
-    let connections = try await client.values("hub/connections")
-    XCTAssertEqual(connections.count, 1)
+    do {
+      _ = try await client.values("hub/connections")
+      XCTFail("the launcher is no owner")
+    } catch {}
     XCTAssertEqual(server.status.owners, 0)
     await server.stop()
     client.close()

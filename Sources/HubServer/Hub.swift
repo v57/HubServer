@@ -78,6 +78,7 @@ final class Hub: @unchecked Sendable {
       headerStore.writeNow()
     }
     security.deviceName = { [unowned self] id in registry.device(id)?.name }
+    security.isChild = { [unowned self] id in registry.isChild(id) }
     network.localAgentEndpoint = configuration.localAgentEndpoint ?? LocalAgent.defaultEndpoint
     if configuration.listen.port != 0 { network.hubPort = Int(configuration.listen.port) }
     network.load()
@@ -87,6 +88,10 @@ final class Hub: @unchecked Sendable {
     observeChanges()
     observeNetwork()
     enrolSelf()
+    // Everything is loaded: copies follow the stored links, and the launcher has its grant
+    security.grants.chain = { [unowned self] id in registry.linkedChildren(id) }
+    security.grants.settleCopies()
+    security.settleLauncher { [unowned self] key in registry.isKeyRevoked(key) }
     registerRoutes()
     api = router.routes
   }
@@ -166,6 +171,7 @@ final class Hub: @unchecked Sendable {
       for connection in connections where connection.certificate?.deviceId == oldest { connection.peer?.close() }
     }
     _ = registry.seen(request.certificate, approve: false)
+    if let ask = request.connection.attachAsk { registry.askAttach(request.deviceId, parent: ask.parent) }
     live.changed(.deviceRequest)
   }
 
@@ -177,8 +183,65 @@ final class Hub: @unchecked Sendable {
       gate.ask(requestSource(connection.remoteAddress), WaitingRequest(certificate: certificate, connection: connection))
     }
     guard let device = registry.device(id) else { return ["id": .string(id), "status": "waiting"] }
-    return ["id": .string(id), "status": device.approved ? "approved" : "pending", "name": .string(device.name),
+    var object: JSONObject = ["id": .string(id), "status": device.approved ? "approved" : "pending", "name": .string(device.name),
       "codeValue": .string(registry.codeValue(id))]
+    if let attached = device.attached { object["attachedTo"] = .string(attached.parent) }
+    return .object(object)
+  }
+
+  private func attachRequests(_ connection: HubConnection) -> JSON {
+    if security.isOwner(connection.principal) { return registry.attachRequests(forParent: nil) }
+    guard let device = connection.device else { return [] }
+    return registry.attachRequests(forParent: device)
+  }
+
+  /// `hub/device/attach/ask`: this connection's device asks to attach, to `parent` if it names one
+  private func askAttach(_ connection: HubConnection, _ parent: JSON?) throws -> JSON {
+    guard let certificate = connection.certificate else { throw ChannelFailure("no device certificate") }
+    if let parent, !parent.isNull, parent.string == nil { throw ChannelFailure("invalid parent") }
+    let named = parent?.string
+    let id = certificate.deviceId
+    if registry.device(id) != nil {
+      registry.askAttach(id, parent: named)
+    } else {
+      // Its row comes at its turn, which keeps the question
+      connection.attachAsk = AttachAsk(at: isoNow(), parent: named)
+      gate.ask(requestSource(connection.remoteAddress), WaitingRequest(certificate: certificate, connection: connection))
+    }
+    return try deviceRequest(connection)
+  }
+
+  /// `hub/device/attach` on the parent's own connection, with its signature. Only an owner's word also approves the
+  /// child; a member's device takes only a child that named it, and an owner still approves that child.
+  private func attachChild(_ call: IncomingCall) throws -> JSON? {
+    let connection = connection(call.peer)
+    guard let parent = connection.device else { throw ChannelFailure.forbidden }
+    let owner = caller(call.peer).owner
+    let id = call.body?["child"]?.string
+    let asked = id.flatMap { registry.device($0)?.attachAsk }
+    if !owner, asked?.parent != parent { throw ChannelFailure.forbidden }
+    if let named = asked?.parent, named != parent { throw ChannelFailure("named another parent") }
+    if let id, isOwnerDevice(id) { throw ChannelFailure("an owner can not be a child") }
+    try registry.attach(child: id, parent: parent, at: call.body?["at"]?.int, signature: call.body?["signature"]?.string, approve: owner)
+    let child = id!
+    gate.forget { $0.deviceId == child }
+    if registry.device(child)?.approved == true {
+      for open in connections where open.certificate?.deviceId == child { attach(open) }
+    }
+    linksChanged()
+    return deviceJSON(child)
+  }
+
+  /// The device itself, or a key on it, in the owners group
+  private func isOwnerDevice(_ id: String) -> Bool {
+    security.isStoredOwner(Principal(device: id)) || registry.servicesOn(id).contains { security.isStoredOwner(Principal(key: $0)) }
+  }
+
+  /// Links or approvals changed: the copies follow in one save, Hub Network closes what they took
+  private func linksChanged() {
+    security.grants.settleCopies()
+    connectionsChanged()
+    live.changed(.attachRequests)
   }
 
   /// Makes a connection with a certificate from an approved device a device connection
@@ -231,7 +294,7 @@ final class Hub: @unchecked Sendable {
     security.host.onPendingChange = { [unowned self] in live.changed(.hostPending, .badges) }
     security.whitelist.onChange = { [unowned self] in live.changed(.whitelist) }
     registry.onChange = { [unowned self] in
-      live.changed(.devices, .pending, .deviceRequest)
+      live.changed(.devices, .pending, .deviceRequest, .attachRequests)
       live.changedDeviceData()
       onChange()
     }
@@ -449,6 +512,10 @@ final class Hub: @unchecked Sendable {
     object["lastSeen"] = .string(id == selfId ? isoNow() : device.lastSeen)
     if let capabilities = device.capabilities { object["capabilities"] = capabilities }
     object["services"] = .array(services)
+    if let attached = device.attached {
+      object["attachedTo"] = .string(attached.parent)
+      object["linked"] = .bool(attached.linked)
+    }
     return .object(object)
   }
 
@@ -507,7 +574,7 @@ final class Hub: @unchecked Sendable {
       return .object(entry)
     }
     guard ports != nil || !services.isEmpty || hostSSH else { return nil }
-    for field in ["os", "arch", "parent", "capabilities"] { object[field] = nil }
+    for field in ["os", "arch", "parent", "capabilities", "attachedTo", "linked"] { object[field] = nil }
     object["services"] = .array(services)
     if let ssh = device.capabilities?["ssh"], hostSSH || ssh["port"]?.int.map({ ports?.contains($0) == true }) == true {
       object["capabilities"] = ["ssh": ssh]
@@ -526,7 +593,7 @@ final class Hub: @unchecked Sendable {
     try registry.approve(id)
     gate.forget { $0.deviceId == id }
     for connection in connections where connection.certificate?.deviceId == id { attach(connection) }
-    connectionsChanged()
+    linksChanged()
     return deviceJSON(id!) ?? .null
   }
 
@@ -604,9 +671,8 @@ final class Hub: @unchecked Sendable {
 
   // MARK: Pairing
 
-  /// At start: a code when the hub has no owners, see `Pairing.start`. None in local mode.
+  /// At start: a code when the hub has no owners, see `Pairing.start`, in local mode too
   func startPairing() -> PairingCode? {
-    guard !configuration.local else { return nil }
     let needed = !security.hasOwners
     let code = pairing.queue.sync { pairing.start(needed: needed) }
     if let code { announce(code) }
@@ -627,6 +693,8 @@ final class Hub: @unchecked Sendable {
   private func pair(_ call: IncomingCall) {
     let connection = connection(call.peer)
     guard let key = connection.key else { return call.fail(ChannelFailure("unauthorized")) }
+    // Asked before the code is used up: a child never becomes an owner
+    if let id = connection.certificate?.deviceId, registry.isChild(id) { return call.fail(ChannelFailure("an owner can not be a child")) }
     let code = call.body?["code"]
     pairing.queue.async { [pairing, queue, unowned self] in
       let result = pairing.verify(code)
@@ -685,7 +753,6 @@ final class Hub: @unchecked Sendable {
       }
       .post("hub/pair", answering: { [unowned self] call in pair(call) })
       .post("hub/pair/new", answering: { [unowned self] call in
-        guard !configuration.local else { throw ChannelFailure("no pairing in local mode") }
         pairing.queue.async { [pairing, queue, unowned self] in
           let code = pairing.create()
           queue.async { [self] in
@@ -857,8 +924,12 @@ final class Hub: @unchecked Sendable {
       .stream("hub/grants") { [unowned self] call in try stream(call, .grants) { [unowned self] in .array(security.grants.grants.map(\.json)) } }
       .post("hub/grant/add") { [unowned self] call in try security.addGrant(call.body, by: caller(call.peer)).json }
       .post("hub/grant/check") { [unowned self] call in try checkGrant(call.peer, call.body) }
+      .post("hub/grant/link") { [unowned self] call in
+        guard let linked = call.body?["linked"]?.bool else { throw ChannelFailure("invalid linked") }
+        return try security.grants.setLinked(id: call.body?["id"]?.string, linked).json
+      }
       .post("hub/grant/remove") { [unowned self] call in
-        guard security.grants.remove(id: call.body?["id"]?.string) != nil else { throw ChannelFailure("grant not found") }
+        try security.removeGrant(id: call.body?["id"]?.string)
         return nil
       }
       .post("hub/host/update") { [unowned self] call in
@@ -980,16 +1051,51 @@ final class Hub: @unchecked Sendable {
         connectionsChanged()
         return deviceJSON(id!)
       }
-      .post("hub/device/remove") { [unowned self] call in
+      .post("hub/device/attach/ask") { [unowned self] call in try askAttach(connection(call.peer), call.body?["parent"]) }
+      .stream("hub/device/attach/requests") { [unowned self] call in
+        let connection = connection(call.peer)
+        try stream(call, .attachRequests) { [unowned self] in attachRequests(connection) }
+      }
+      .post("hub/device/attach") { [unowned self] call in try attachChild(call) }
+      .post("hub/device/attach/dismiss") { [unowned self] call in
         let id = call.body?["id"]?.string
+        let named = id.flatMap { registry.device($0)?.attachAsk?.parent }
+        if !caller(call.peer).owner, named == nil || named != connection(call.peer).device { throw ChannelFailure.forbidden }
+        try registry.dismissAttach(id)
+        live.changed(.attachRequests)
+        return nil
+      }
+      .post("hub/device/detach") { [unowned self] call in
+        let id = call.body?["id"]?.string
+        let parent = id.flatMap { registry.device($0)?.attached?.parent }
+        if !caller(call.peer).owner, parent == nil || parent != connection(call.peer).device { throw ChannelFailure.forbidden }
+        try registry.detach(id)
+        linksChanged()
+        return deviceJSON(id!)
+      }
+      .post("hub/device/link") { [unowned self] call in
+        guard let linked = call.body?["linked"]?.bool else { throw ChannelFailure("invalid linked") }
+        let id = call.body?["id"]?.string
+        try registry.setLinked(id, linked)
+        linksChanged()
+        return deviceJSON(id!)
+      }
+      .post("hub/device/remove") { [unowned self] call in
+        // Its children came in on its word, so they go too and ask again
+        let id = call.body?["id"]?.string
+        let below = registry.below(id)
         try registry.remove(id)
-        cleanUp(id!, revokedKeys: [])
+        for child in below { try registry.remove(child) }
+        for device in [id!] + below { cleanUp(device, revokedKeys: []) }
         return nil
       }
       .post("hub/device/revoke") { [unowned self] call in
+        // Everything below it goes too; revoking a child leaves its parent alone
         let id = call.body?["id"]?.string
+        let below = registry.below(id)
         let revokedKeys = try registry.revoke(id, keep: call.body?["keepServices"]?.strings ?? [])
-        cleanUp(id!, revokedKeys: revokedKeys)
+        let removals = try [(id!, revokedKeys)] + below.map { ($0, try registry.revoke($0, keep: [])) }
+        for (device, keys) in removals { cleanUp(device, revokedKeys: keys) }
         return nil
       }
       .post("hub/device/describe") { [unowned self] call in

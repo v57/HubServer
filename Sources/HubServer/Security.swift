@@ -20,9 +20,10 @@ private let publicBuiltins: Set<String> = [
 // `hub/net/bind` keeps the proof of its bind kind, `hub/net/node` tells agents where their node is, `hub/pair`
 // takes any keyed caller (section 12), `hub/profile/update` labels the caller's own connection,
 // `hub/device/request` answers for its own certificate
-private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check", "hub/profile/update", "hub/device/request"]
+private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check", "hub/profile/update", "hub/device/request", "hub/device/attach/ask"]
 private let reporterBuiltins: Set<String> = ["hub/device/describe", "hub/device/data"]
-private let grantBuiltins: Set<String> = ["hub/devices", "hub/devices/data"]
+// The attach paths check their caller themselves: an owner, or the parent on its own connection
+private let grantBuiltins: Set<String> = ["hub/devices", "hub/devices/data", "hub/device/attach", "hub/device/attach/requests", "hub/device/attach/dismiss", "hub/device/detach"]
 
 /// Access of a built-in path, nil for service paths
 func builtinAccess(_ path: String) -> BuiltinAccess? {
@@ -50,6 +51,8 @@ private let hubApiNames: [(String, String)] = [
 ]
 
 let ownersGroup = "owners"
+/// `by` of the grant `HUBLAUNCHER` brings
+private let launcherGrant = "launcher"
 func keyMember(_ key: String) -> String { "key:\(key)" }
 func deviceMember(_ id: String) -> String { "device:\(id)" }
 /// `key:<SPKI>`, `device:<id>`, or a plain SPKI meaning `key:`
@@ -156,10 +159,21 @@ struct Grant {
   /// Key of the owner who added it
   var by: String
   var at: String
+  /// A device's own grant the owner linked: it passes to the device's linked children, any depth (protocol.md section 14)
+  var linked = false
+  /// A copy on a child: the id of the grant it came from. Goes when that grant does, and an owner giving the same one
+  /// directly ends it.
+  var copyOf: String?
 
   var json: JSON {
-    ["id": .string(id), "subject": subject.json, "object": object.json, "by": .string(by), "at": .string(at)]
+    var object: JSONObject = ["id": .string(id), "subject": subject.json, "object": self.object.json, "by": .string(by), "at": .string(at)]
+    if linked { object["linked"] = true }
+    if let copyOf { object["copyOf"] = .string(copyOf) }
+    return .object(object)
   }
+  /// What makes two grants the same one
+  var identity: String { Self.identity(subject, object) }
+  static func identity(_ subject: GrantSubject, _ object: GrantObject) -> String { "\(subject.json.text)\n\(object.json.text)" }
 }
 
 /// `grants.json`: who may call which paths
@@ -167,8 +181,10 @@ final class GrantStore {
   private(set) var grants: [Grant] = []
   var migrated: [String] = []
   let store: JSONStore
-  /// Grants added or removed
+  /// Grants added or removed, copies too
   var onChange: ([Grant]) -> Void = { _ in }
+  /// A device's linked children, from the device registry. No copies change before it has loaded.
+  var chain: ((String) -> [String])?
 
   init(storage: Storage) {
     store = storage.store("grants.json")
@@ -180,16 +196,29 @@ final class GrantStore {
     store.load { data in
       guard data["schema"]?.int == 1, let grants = data["grants"]?.array else { throw ChannelFailure("unsupported grants file") }
       self.grants = try grants.map {
-        Grant(id: $0["id"]?.string ?? UUID().uuidString.lowercased(), subject: try GrantSubject($0["subject"]),
-          object: try GrantObject($0["object"]), by: $0["by"]?.string ?? "", at: $0["at"]?.string ?? "")
+        let subject = try GrantSubject($0["subject"])
+        var isDevice = false
+        if case .device = subject { isDevice = true }
+        return Grant(id: $0["id"]?.string ?? UUID().uuidString.lowercased(), subject: subject,
+          object: try GrantObject($0["object"]), by: $0["by"]?.string ?? "", at: $0["at"]?.string ?? "",
+          linked: $0["linked"] == .bool(true) && isDevice && $0["copyOf"]?.string == nil, copyOf: $0["copyOf"]?.string)
       }
       migrated = data["migrated"]?.strings ?? []
     }
   }
-  /// Adds a grant, or returns the same one if it exists
+  /// Adds a grant, or returns the same one if it exists. A copy of it becomes a direct grant: the owner gave it now, so
+  /// it stays when the grant it came from goes.
   @discardableResult
   func add(_ subject: GrantSubject, _ object: GrantObject, by: String) -> Grant {
-    if let existing = grants.first(where: { $0.subject == subject && $0.object == object }) { return existing }
+    if let index = grants.firstIndex(where: { $0.subject == subject && $0.object == object }) {
+      guard grants[index].copyOf != nil else { return grants[index] }
+      grants[index].copyOf = nil
+      grants[index].by = by
+      grants[index].at = isoNow()
+      let direct = grants[index]
+      changed([direct])
+      return direct
+    }
     let grant = Grant(id: newId(), subject: subject, object: object, by: by, at: isoNow())
     grants.append(grant)
     changed([grant])
@@ -238,9 +267,81 @@ final class GrantStore {
   func allowsShare(_ caller: Caller, _ share: String) -> Bool {
     grants.contains { $0.object == .share(share) && $0.subject.matches(caller) }
   }
-  private func changed(_ grants: [Grant]) {
+  /// Whether a device's own grant passes down its linked children. Only a `{ device }` grant can, and only its own.
+  @discardableResult
+  func setLinked(id: String?, _ linked: Bool) throws -> Grant {
+    guard let index = grants.firstIndex(where: { $0.id == id }) else { throw ChannelFailure("grant not found") }
+    guard case .device = grants[index].subject, grants[index].copyOf == nil else { throw ChannelFailure("only a device's own grant passes down") }
+    if grants[index].linked == linked { return grants[index] }
+    grants[index].linked = linked
+    let grant = grants[index]
+    changed([grant])
+    return grant
+  }
+  /// The device registry changed links: writes the copies that follow, in one save
+  func settleCopies() {
+    let changed = settle()
+    guard !changed.isEmpty else { return }
     store.save()
-    onChange(grants)
+    onChange(changed)
+  }
+  /// Makes the copies what the links say, and returns those added or removed. Every linked grant goes to each device down
+  /// the chain of linked children, except where that device holds the same grant directly. The walk never decides a
+  /// call: checks read the copies like any other grant.
+  private func settle() -> [Grant] {
+    guard let chain else { return [] }
+    let direct = Set(grants.filter { $0.copyOf == nil }.map(\.identity))
+    var order: [String] = []
+    var wanted: [String: (subject: GrantSubject, object: GrantObject, sources: [Grant])] = [:]
+    for grant in grants where grant.copyOf == nil && grant.linked {
+      guard case .device(let device) = grant.subject else { continue }
+      var seen: Set<String> = [device]
+      var walk = [device]
+      while !walk.isEmpty {
+        for child in chain(walk.removeFirst()) where !seen.contains(child) {
+          seen.insert(child)
+          walk.append(child)
+          let key = Grant.identity(.device(child), grant.object)
+          if direct.contains(key) { continue }
+          if wanted[key] != nil {
+            wanted[key]!.sources.append(grant)
+          } else {
+            wanted[key] = (.device(child), grant.object, [grant])
+            order.append(key)
+          }
+        }
+      }
+    }
+    var changed: [Grant] = []
+    var held = Set<String>()
+    var kept: [Grant] = []
+    for var grant in grants {
+      guard let copyOf = grant.copyOf else {
+        kept.append(grant)
+        continue
+      }
+      let key = grant.identity
+      guard let entry = wanted[key] else {
+        changed.append(grant)
+        continue
+      }
+      if !entry.sources.contains(where: { $0.id == copyOf }) { grant.copyOf = entry.sources[0].id }
+      held.insert(key)
+      kept.append(grant)
+    }
+    grants = kept
+    for key in order where !held.contains(key) {
+      let entry = wanted[key]!
+      let copy = Grant(id: newId(), subject: entry.subject, object: entry.object, by: entry.sources[0].by, at: isoNow(), copyOf: entry.sources[0].id)
+      grants.append(copy)
+      changed.append(copy)
+    }
+    return changed
+  }
+  private func changed(_ grants: [Grant]) {
+    let copies = settle()
+    store.save()
+    onChange(grants + copies)
   }
 }
 
@@ -609,11 +710,13 @@ final class Security {
   let settings: HubSettings
   /// Per-key call requests waiting for an owner, in memory (`hub/call/pending`)
   private(set) var callPending = OrderedSets()
-  /// The launcher key, which may host `launcher/*` and enrols its device at once
+  /// The launcher key, which may host and call `launcher/*` (a grant, `settleLauncher`) and enrols its device at once
   var launcher: String?
   let hubKey: String
   /// Device names for `caller.device`
   var deviceName: (String) -> String? = { _ in nil }
+  /// Whether a device has a parent: a child is never an owner, whatever its key or a group says
+  var isChild: (String) -> Bool = { _ in false }
   /// A store that grants or tombstones failed to load: only owners may call service paths until an owner sets the mode
   private(set) var lockdown = false
 
@@ -641,15 +744,21 @@ final class Security {
     if [settings.store, names.store, whitelist.store, members.store, grants.store].contains(where: \.corrupt) { lockDown() }
   }
 
-  /// Local mode (protocol.md section 12): `default-allow` and the launcher key is an owner, neither stored
+  /// Local mode (protocol.md section 12): `default-allow`, not stored. Nobody is an owner by it.
   var local = false
   var mode: SecurityMode { local ? .defaultAllow : settings.mode }
   var requireV1: Bool { settings.requireV1 }
   /// `default-deny` while locked down
   var effectiveMode: SecurityMode { lockdown ? .defaultDeny : mode }
-  /// The launcher key in local mode
-  private func isLocalOwner(_ key: String?) -> Bool {
-    local && key != nil && key == launcher
+  /// The launcher's `launcher/*`: a grant to the key named by `HUBLAUNCHER`, never owner rights. A key named before
+  /// keeps none of it, and a key revoked with its device gets none back.
+  func settleLauncher(isRevoked: (String) -> Bool) {
+    let current = launcher.flatMap { isRevoked($0) ? nil : $0 }
+    grants.removeAll { grant in
+      guard grant.by == launcherGrant else { return false }
+      return grant.subject != current.map(GrantSubject.key)
+    }
+    if let current { grants.add(.key(current), .prefix("launcher/"), by: launcherGrant) }
   }
 
   /// Only owners may call service paths, and the hub stays `default-deny` after a restart
@@ -680,7 +789,6 @@ final class Security {
     members.add(keyMember(key), to: ownersGroup)
     members.add(deviceMember(HubCrypto.deviceId(spki: key)), to: ownersGroup)
   }
-  /// Stored owners, which local mode's launcher isn't
   var hasOwners: Bool { !members.members(ownersGroup).isEmpty }
 
   func caller(_ principal: Principal) -> Caller {
@@ -690,12 +798,17 @@ final class Security {
   }
   /// Every group the key or its device belongs to, `owners` first
   func groups(_ principal: Principal) -> [String] {
-    var groups = members.groupsOf(principal)
-    if isLocalOwner(principal.key), !groups.contains(ownersGroup) { groups.append(ownersGroup) }
+    let groups = members.groupsOf(principal)
+    if let device = principal.device, isChild(device) { return groups.filter { $0 != ownersGroup } }
     return groups.contains(ownersGroup) ? [ownersGroup] + groups.filter { $0 != ownersGroup } : groups
   }
   func isOwner(_ principal: Principal) -> Bool {
-    isLocalOwner(principal.key) || (principal.key.map { members.has(keyMember($0), in: ownersGroup) } ?? false)
+    if let device = principal.device, isChild(device) { return false }
+    return isStoredOwner(principal)
+  }
+  /// In the owners group by key or device, as stored
+  func isStoredOwner(_ principal: Principal) -> Bool {
+    (principal.key.map { members.has(keyMember($0), in: ownersGroup) } ?? false)
       || (principal.device.map { members.has(deviceMember($0), in: ownersGroup) } ?? false)
   }
 
@@ -776,6 +889,12 @@ final class Security {
     let subject = try GrantSubject(body?["subject"])
     let object = try GrantObject(body?["object"])
     return grants.add(subject, object, by: caller.key ?? "owner")
+  }
+  /// `hub/grant/remove`: a copy goes with what it came from, or with its child's link
+  func removeGrant(id: String?) throws {
+    guard let grant = grants.grants.first(where: { $0.id == id }) else { throw ChannelFailure("grant not found") }
+    if grant.copyOf != nil { throw ChannelFailure("grant is a copy") }
+    _ = grants.remove(id: id)
   }
   /// Removes grants naming a removed device and drops it from every group
   func removeDevice(_ id: String) {

@@ -3,7 +3,7 @@ import Foundation
 
 /// What a hub stream shows. Streams of a topic recompute when it changes.
 enum LiveTopic: Hashable {
-  case status, badges, connections, devices, pending, deviceRequest, deviceData(String), api, providers, security, grants, groups
+  case status, badges, connections, devices, pending, deviceRequest, attachRequests, deviceData(String), api, providers, security, grants, groups
   case hostPending, callPending, whitelist, header
   case network, networkGenerations, networkRevoked, netNode, netList
 

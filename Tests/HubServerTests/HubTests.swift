@@ -211,11 +211,19 @@ final class SecurityTests: XCTestCase {
     security.names.add("s3/read", name: "S3: Read")
     XCTAssertFalse(security.allowsCall(stranger, "s3/read", isPublic: false))
     XCTAssertThrowsError(try security.setMode(["mode": "open"]))
-    // Local mode: default-allow and the launcher key is an owner, neither stored
+    // The launcher has launcher/* by a grant and nothing else, in local mode too
     security.local = true
     security.launcher = "launcher"
-    XCTAssertTrue(security.caller(Principal(key: "launcher")).owner)
-    XCTAssertFalse(security.members.has(keyMember("launcher"), in: ownersGroup))
+    security.settleLauncher { _ in false }
+    let launcher = security.caller(Principal(key: "launcher"))
+    XCTAssertFalse(launcher.owner)
+    XCTAssertTrue(security.allowsCall(launcher, "launcher/status", isPublic: false))
+    security.names.add("s3/write", name: "S3: Write")
+    XCTAssertFalse(security.allowsCall(launcher, "s3/write", isPublic: false))
+    // A key named before keeps none of it, and a revoked one gets none back
+    security.launcher = "other"
+    security.settleLauncher { $0 == "other" }
+    XCTAssertFalse(security.grants.grants.contains { $0.by == "launcher" })
   }
 
   func testPairing() throws {

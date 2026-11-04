@@ -3,6 +3,13 @@ import Foundation
 
 // Device layer, protocol.md sections 1, 3, 5, 6 and 8
 
+/// What a parent signs to take a child (protocol.md section 14)
+func attachSignedData(hubKey: String, parentKey: String, childKey: String, at: Int) -> String {
+  "hubattach1:\(hubKey):\(parentKey):\(childKey):\(at)"
+}
+/// An attach signature counts for this long either way, in seconds
+let attachLifetime = 300
+
 /// Longest certificate lifetime, 7 days
 let certificateMaxLifetime = 604_800
 private let certificateClockSkew = 30
@@ -59,6 +66,44 @@ func verifyCertificate(_ header: String, serviceKey: String, hubKey: String, now
     deviceName: body["deviceName"]?.string, platform: platform, parent: body["parent"]?.string, iat: iat, exp: exp))
 }
 
+/// The parent that signed for a device. Checked once at attach, and calls never walk it.
+struct DeviceAttachment {
+  var parent: String
+  var parentKey: String
+  var at: Int
+  var signature: String
+  var linked = false
+
+  init(parent: String, parentKey: String, at: Int, signature: String, linked: Bool = false) {
+    self.parent = parent
+    self.parentKey = parentKey
+    self.at = at
+    self.signature = signature
+    self.linked = linked
+  }
+  init?(_ json: JSON?) {
+    guard let parent = json?["parent"]?.string, let parentKey = json?["parentKey"]?.string, let at = json?["at"]?.int,
+      let signature = json?["signature"]?.string else { return nil }
+    self.init(parent: parent, parentKey: parentKey, at: at, signature: signature, linked: json?["linked"] == .bool(true))
+  }
+  var json: JSON {
+    var object: JSONObject = ["parent": .string(parent), "parentKey": .string(parentKey), "at": .int(at), "signature": .string(signature)]
+    if linked { object["linked"] = true }
+    return .object(object)
+  }
+}
+
+/// A device asked to attach, to `parent` if it named one
+struct AttachAsk {
+  var at: String
+  var parent: String?
+  var json: JSON {
+    var object: JSONObject = ["at": .string(at)]
+    if let parent { object["parent"] = .string(parent) }
+    return .object(object)
+  }
+}
+
 struct StoredDevice {
   var key: String
   var name: String
@@ -77,6 +122,10 @@ struct StoredDevice {
   var lastSeen: String
   var revoked: String?
   var capabilities: JSON?
+  var attached: DeviceAttachment?
+  var attachAsk: AttachAsk?
+  /// An attach request was turned down; further ones are ignored while the hub knows it
+  var attachDismissed = false
 
   init(key: String, name: String, platform: String?, parent: String?, now: String) {
     self.key = key
@@ -102,6 +151,9 @@ struct StoredDevice {
     lastSeen = json["lastSeen"]?.string ?? createdAt
     revoked = json["revoked"]?.string
     capabilities = json["capabilities"]?.object.map { .object($0) }
+    attached = DeviceAttachment(json["attached"])
+    if let at = json["attachAsk"]?["at"]?.string { attachAsk = AttachAsk(at: at, parent: json["attachAsk"]?["parent"]?.string) }
+    attachDismissed = json["attachDismissed"] == .bool(true)
   }
   var json: JSON {
     var object: JSONObject = ["key": .string(key), "name": .string(name)]
@@ -117,6 +169,9 @@ struct StoredDevice {
     object["lastSeen"] = .string(lastSeen)
     object["revoked"] = JSON(revoked)
     if let capabilities { object["capabilities"] = capabilities }
+    if let attached { object["attached"] = attached.json }
+    if let attachAsk { object["attachAsk"] = attachAsk.json }
+    if attachDismissed { object["attachDismissed"] = true }
     return .object(object)
   }
 }
@@ -311,6 +366,103 @@ final class DeviceRegistry {
     if approve { settle(id) }
     save()
     return devices[id]
+  }
+
+  /// A device with a certificate asks to attach. Ignored once attached or turned down.
+  func askAttach(_ id: String, parent: String?) {
+    guard let device = devices[id], device.revoked == nil, device.attached == nil, !device.attachDismissed else { return }
+    if let ask = device.attachAsk, ask.parent == parent { return }
+    devices[id]!.attachAsk = AttachAsk(at: isoNow(), parent: parent)
+    save()
+  }
+  /// Turns an attach request down
+  func dismissAttach(_ id: String?) throws {
+    _ = try require(id)
+    devices[id!]!.attachAsk = nil
+    devices[id!]!.attachDismissed = true
+    save()
+  }
+  /// What's asked of the hub right now, oldest first
+  func attachRequests(forParent parent: String?) -> JSON {
+    let ids = order.filter { devices[$0]?.attachAsk != nil && devices[$0]?.attached == nil && devices[$0]?.revoked == nil }
+      .sorted { devices[$0]!.attachAsk!.at < devices[$1]!.attachAsk!.at }
+    return .array(ids.compactMap { id -> JSON? in
+      let device = devices[id]!
+      let ask = device.attachAsk!
+      if let parent, ask.parent != parent { return nil }
+      var object: JSONObject = ["id": .string(id), "key": .string(device.key), "name": .string(device.name)]
+      if let platform = device.platform { object["platform"] = .string(platform) }
+      object["approved"] = .bool(device.approved)
+      let value = codeValue(id)
+      object["safetyCode"] = .string(HubCrypto.safetyCode(hubKey: hubKey, key: device.key, codeValue: value))
+      object["codeValue"] = .string(value)
+      if let named = ask.parent { object["parent"] = .string(named) }
+      object["askedAt"] = .string(ask.at)
+      return .object(object)
+    })
+  }
+  /// The parent's signature, checked here and never again. The child must have asked, and it starts with nothing linked.
+  /// `approve`: the signer is an owner, whose word approves the child too.
+  func attach(child id: String?, parent parentId: String, at: Int?, signature: String?, approve: Bool, now: Int = Int(Date().timeIntervalSince1970)) throws {
+    let child = try require(id)
+    let parent = try require(parentId)
+    if child.revoked != nil || parent.revoked != nil { throw ChannelFailure("device revoked") }
+    guard parent.approved else { throw ChannelFailure.forbidden }
+    if child.attached != nil { throw ChannelFailure("already attached") }
+    if child.attachAsk == nil { throw ChannelFailure("no attach request") }
+    // Up from the parent: reaching the child would close a loop. Stored links can't loop, the seen set is a guard.
+    var seen = Set<String>()
+    var current: String? = parentId
+    while let up = current, !seen.contains(up) {
+      if up == id { throw ChannelFailure("attach would make a loop") }
+      seen.insert(up)
+      current = devices[up]?.attached?.parent
+    }
+    guard let at, abs(at - now) <= attachLifetime else { throw ChannelFailure("attach signature expired") }
+    guard let signature, HubCrypto.verify(signature: signature, message: attachSignedData(hubKey: hubKey, parentKey: parent.key, childKey: child.key, at: at), spki: parent.key) else {
+      throw ChannelFailure("invalid signature")
+    }
+    devices[id!]!.attached = DeviceAttachment(parent: parentId, parentKey: parent.key, at: at, signature: signature)
+    devices[id!]!.attachAsk = nil
+    if approve { settle(id!) }
+    save()
+  }
+  /// Ends a link. The device stays as it is otherwise; the copies it had go with the link.
+  func detach(_ id: String?) throws {
+    guard try require(id).attached != nil else { throw ChannelFailure("not attached") }
+    devices[id!]!.attached = nil
+    save()
+  }
+  /// Whether the chain of linked grants reaches this child: new children start out of it
+  func setLinked(_ id: String?, _ linked: Bool) throws {
+    guard try require(id).attached != nil else { throw ChannelFailure("not attached") }
+    if devices[id!]!.attached!.linked == linked { return }
+    devices[id!]!.attached!.linked = linked
+    save()
+  }
+  func isChild(_ id: String) -> Bool { devices[id]?.attached != nil }
+  /// The children linked grants pass to: approved, not revoked, and linked by the owner
+  func linkedChildren(_ id: String) -> [String] {
+    order.filter { child in
+      guard let device = devices[child], let attached = device.attached else { return false }
+      return attached.parent == id && attached.linked && device.approved && device.revoked == nil
+    }
+  }
+  /// Every device below this one, linked or not, nearest first
+  func below(_ id: String?) -> [String] {
+    guard let id else { return [] }
+    var found: [String] = []
+    var walk = [id]
+    var seen: Set<String> = [id]
+    while !walk.isEmpty {
+      let current = walk.removeFirst()
+      for child in order where devices[child]?.attached?.parent == current && !seen.contains(child) {
+        seen.insert(child)
+        found.append(child)
+        walk.append(child)
+      }
+    }
+    return found
   }
 
   /// Places a service key on an approved device. Returns the device it moved from, if it moved.
