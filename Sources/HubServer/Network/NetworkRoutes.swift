@@ -190,9 +190,10 @@ extension Hub {
     network.onGenerationChanged = { [unowned self] in live.changed(.networkGenerations) }
     network.onRevokedDevicesChanged = { [unowned self] in live.changed(.networkRevoked) }
     network.onBindApprove = { [unowned self] connection in
-      if let id = connection.certificate?.deviceId { _ = try? approve(id) }
+      approveConnection(connection)
     }
     network.deviceLabel = { [unowned self] id in registry.device(id)?.name }
+    network.serviceDevice = { [unowned self] key in registry.services[key]?.device }
     network.deviceSSHPort = { [unowned self] id in
       guard let port = registry.device(id)?.capabilities?["ssh"]?["port"]?.int, port > 0, port < 65536 else { return nil }
       return port

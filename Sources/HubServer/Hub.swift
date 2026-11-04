@@ -28,6 +28,8 @@ final class Hub: @unchecked Sendable {
   private var reporterCandidates: [HubConnection] = []
   /// Latest live data per device, in memory only
   private var liveData: [String: JSON] = [:]
+  /// New requests, one a second
+  let gate: RequestGate
   private let headerStore: JSONStore
   private(set) var name: String
   let network: NetworkAPI
@@ -50,7 +52,8 @@ final class Hub: @unchecked Sendable {
     let ranBefore = keyExisted || FileManager.default.fileExists(atPath: storage.url("hub.json").path)
     key = try configuration.key ?? HubKeyPair.loadOrCreate(keyURL)
     security = Security(storage: storage, hubKey: key.publicKey)
-    registry = DeviceRegistry(storage: storage)
+    registry = DeviceRegistry(storage: storage, hubKey: key.publicKey)
+    gate = RequestGate(queue: queue)
     pairing = Pairing(directory: configuration.dataDirectory, log: log)
     live = LiveValues(queue: queue)
     network = NetworkAPI(storage: storage, security: security, key: key, queue: queue)
@@ -80,6 +83,7 @@ final class Hub: @unchecked Sendable {
     network.load()
     netNode.load()
     for (path, name) in networkAPINames { security.names.register(path, name: name) }
+    gate.admit = { [unowned self] request in admit(request) }
     observeChanges()
     observeNetwork()
     enrolSelf()
@@ -121,6 +125,7 @@ final class Hub: @unchecked Sendable {
     let headers = request.channelHeaders
     let key = try security.verifyToken(headers["auth"], version: headers["v"])
     let connection = HubConnection(key: key, ip: headers["x-hub-remote-ip"])
+    connection.remoteAddress = request.remoteAddress
     guard let key else { return connection }
     if registry.isKeyRevoked(key) { throw ChannelFailure("key revoked") }
     guard let header = headers["device"], !header.isEmpty else { return connection }
@@ -131,6 +136,13 @@ final class Hub: @unchecked Sendable {
       let id = certificate.deviceId
       let approve = security.isOwner(Principal(key: key)) || security.isOwner(Principal(device: id))
         || (security.launcher != nil && key == security.launcher) || id == selfId
+      // A new request waits its turn; it holds nothing until then, and connects as a plain key. The source is the
+      // address the transport saw, never a header the client sent.
+      if !approve && registry.device(id) == nil {
+        connection.certificate = certificate
+        gate.ask(requestSource(request.remoteAddress), WaitingRequest(certificate: certificate, connection: connection))
+        return connection
+      }
       guard let device = registry.seen(certificate, approve: approve) else {
         log("Ignored certificate of revoked device \(id)")
         return connection
@@ -140,6 +152,33 @@ final class Hub: @unchecked Sendable {
       live.changed(.pending)
     }
     return connection
+  }
+
+  /// A new request's turn: it joins the pending list, pushing out the oldest once that is full
+  private func admit(_ request: WaitingRequest) {
+    guard registry.device(request.deviceId) == nil else { return }
+    var pending = registry.pendingIds()
+    let online = Set(connections.compactMap { $0.certificate?.deviceId })
+    while pending.count >= maxPendingDevices {
+      let oldest = pending.remove(at: pending.firstIndex { !online.contains($0) } ?? 0)
+      _ = try? registry.remove(oldest)
+      // It asks again when it reconnects
+      for connection in connections where connection.certificate?.deviceId == oldest { connection.peer?.close() }
+    }
+    _ = registry.seen(request.certificate, approve: false)
+    live.changed(.deviceRequest)
+  }
+
+  /// Where a connection's device stands. A connection still without a place in line takes one.
+  private func deviceRequest(_ connection: HubConnection) throws -> JSON {
+    guard let certificate = connection.certificate else { throw ChannelFailure("no device certificate") }
+    let id = certificate.deviceId
+    if registry.device(id) == nil {
+      gate.ask(requestSource(connection.remoteAddress), WaitingRequest(certificate: certificate, connection: connection))
+    }
+    guard let device = registry.device(id) else { return ["id": .string(id), "status": "waiting"] }
+    return ["id": .string(id), "status": device.approved ? "approved" : "pending", "name": .string(device.name),
+      "codeValue": .string(registry.codeValue(id))]
   }
 
   /// Makes a connection with a certificate from an approved device a device connection
@@ -164,6 +203,9 @@ final class Hub: @unchecked Sendable {
     let connection = peer.state as! HubConnection
     connection.isOpen = false
     connections.removeAll { $0 === connection }
+    gate.forget { $0.connection === connection }
+    // Another connection of the same device takes its place in line
+    live.changed(.deviceRequest)
     removeServices(connection, Array(connection.services))
     let hadApps = !connection.apps.isEmpty
     apps.removeAll(connection)
@@ -189,7 +231,8 @@ final class Hub: @unchecked Sendable {
     security.host.onPendingChange = { [unowned self] in live.changed(.hostPending, .badges) }
     security.whitelist.onChange = { [unowned self] in live.changed(.whitelist) }
     registry.onChange = { [unowned self] in
-      live.changed(.devices, .pending)
+      live.changed(.devices, .pending, .deviceRequest)
+      live.changedDeviceData()
       onChange()
     }
   }
@@ -197,6 +240,7 @@ final class Hub: @unchecked Sendable {
   /// Connections, their devices or their groups changed
   func connectionsChanged() {
     live.changed(.connections, .devices, .status, .badges, .providers, .api, .netList)
+    live.changedDeviceData()
     onChange()
   }
 
@@ -408,17 +452,89 @@ final class Hub: @unchecked Sendable {
     return .object(object)
   }
 
-  private var devicesJSON: JSON {
-    .array(registry.order.compactMap(deviceJSON))
+  private func withCodeValue(_ id: String) -> JSON? {
+    guard var object = deviceJSON(id)?.object else { return nil }
+    object["codeValue"] = .string(registry.codeValue(id))
+    return .object(object)
+  }
+
+  /// Owners and those an owner granted `hub/devices` itself see every device
+  private func seesEverything(_ caller: Caller) -> Bool {
+    caller.owner || (!security.lockdown && security.grants.allowsPath(caller, "hub/devices"))
+  }
+
+  /// A caller's own devices: the one it's attached to, the one its key runs on, and those of a person group it's in
+  /// (protocol.md section 13)
+  private func ownDevices(_ caller: Caller) -> Set<String> {
+    var own = Set<String>()
+    func placed(_ key: String?) -> String? { key.flatMap { registry.services[$0]?.device } }
+    if let device = caller.device { own.insert(device.id) }
+    if let device = placed(caller.key) { own.insert(device) }
+    for group in caller.groups where security.groups.isPerson(group) {
+      for member in security.members.members(group) {
+        if member.hasPrefix("device:") {
+          own.insert(String(member.dropFirst("device:".count)))
+        } else if member.hasPrefix("key:"), let device = placed(String(member.dropFirst("key:".count))) {
+          own.insert(device)
+        }
+      }
+    }
+    return own
+  }
+
+  /// `hub/devices` for one connection
+  private func devicesJSON(_ connection: HubConnection, _ caller: Caller) -> JSON {
+    if seesEverything(caller) { return .array(registry.order.compactMap(withCodeValue)) }
+    let own = ownDevices(caller)
+    let shared = network.devicesSharedWith(connection)
+    let hostSSH = network.canUseHostSSH(connection)
+    let hostDevice = network.hubHostProfile?.device ?? selfId
+    return .array(registry.order.compactMap { id in
+      guard let device = registry.device(id), device.approved, device.revoked == nil else { return nil }
+      if own.contains(id) { return withCodeValue(id) }
+      return sharedJSON(id, device, caller, ports: shared[id], hostSSH: hostSSH && id == hostDevice)
+    })
+  }
+
+  /// A device someone else runs, as a member sees it: its identity and how to reach it, the services it may call, and its
+  /// SSH details only where it may use them. Nil while nothing on it is shared with the caller.
+  private func sharedJSON(_ id: String, _ device: StoredDevice, _ caller: Caller, ports: Set<Int>?, hostSSH: Bool) -> JSON? {
+    guard var object = deviceJSON(id)?.object else { return nil }
+    let services: [JSON] = (object["services"]?.array ?? []).compactMap { service in
+      let paths = (service["paths"]?.strings ?? []).filter { security.grants.allowsPath(caller, $0) }
+      guard !paths.isEmpty, var entry = service.object else { return nil }
+      entry["paths"] = JSON(paths)
+      return .object(entry)
+    }
+    guard ports != nil || !services.isEmpty || hostSSH else { return nil }
+    for field in ["os", "arch", "parent", "capabilities"] { object[field] = nil }
+    object["services"] = .array(services)
+    if let ssh = device.capabilities?["ssh"], hostSSH || ssh["port"]?.int.map({ ports?.contains($0) == true }) == true {
+      object["capabilities"] = ["ssh": ssh]
+    }
+    return .object(object)
+  }
+
+  /// Live data stays with the device's own person, and owners
+  private func seesLiveData(_ caller: Caller, _ id: String) -> Bool {
+    registry.device(id) != nil && (seesEverything(caller) || ownDevices(caller).contains(id))
   }
 
   /// Approves a pending device and attaches its open connections
   @discardableResult
   func approve(_ id: String?) throws -> JSON {
     try registry.approve(id)
+    gate.forget { $0.deviceId == id }
     for connection in connections where connection.certificate?.deviceId == id { attach(connection) }
     connectionsChanged()
     return deviceJSON(id!) ?? .null
+  }
+
+  /// Approves the device of a connection that proved itself otherwise (pairing, a Hub Network join), waiting or not
+  func approveConnection(_ connection: HubConnection) {
+    guard let certificate = connection.certificate else { return }
+    if registry.device(certificate.deviceId) == nil { _ = registry.seen(certificate, approve: false) }
+    _ = try? approve(certificate.deviceId)
   }
 
   /// Closes the device's connections and those of revoked keys, and drops their grants and group memberships
@@ -521,7 +637,7 @@ final class Hub: @unchecked Sendable {
         case .success:
           security.members.add(keyMember(key), to: ownersGroup)
           if let id = connection.certificate?.deviceId {
-            _ = try? approve(id)
+            approveConnection(connection)
             security.members.add(deviceMember(id), to: ownersGroup)
           }
           connectionsChanged()
@@ -587,6 +703,8 @@ final class Hub: @unchecked Sendable {
         let path = call.body?.string
         try stream(call, .providers) { [unowned self] in providers(path, principal: principal) }
       }
+      // A label for this connection, for owners and callers of its services. It's never a device's name (protocol.md
+      // section 13), and a device's request shows only what its certificate asks for
       .post("hub/profile/update") { [unowned self] call in
         let connection = connection(call.peer)
         if let icon = call.body?["icon"], !icon.isNull { connection.icon = icon }
@@ -700,7 +818,8 @@ final class Hub: @unchecked Sendable {
     .array(connections.map { connection in
       var object: JSONObject = ["id": .string(connection.id)]
       if let key = connection.key { object["key"] = .string(key) }
-      if let name = connection.name { object["name"] = .string(name) }
+      // A device still asking holds no name yet
+      if let name = connection.name, connection.certificate == nil || connection.device != nil { object["name"] = .string(name) }
       if let icon = connection.icon { object["icon"] = icon }
       object["services"] = .int(connection.services.count)
       object["apps"] = .int(connection.apps.count)
@@ -844,7 +963,15 @@ final class Hub: @unchecked Sendable {
 
   private func registerDeviceRoutes() {
     router
-      .stream("hub/devices") { [unowned self] call in try stream(call, .devices) { [unowned self] in devicesJSON } }
+      .stream("hub/devices") { [unowned self] call in
+        let connection = connection(call.peer)
+        try stream(call, .devices) { [unowned self] in devicesJSON(connection, caller(call.peer)) }
+      }
+      .stream("hub/device/request") { [unowned self] call in
+        let connection = connection(call.peer)
+        guard connection.certificate != nil else { throw ChannelFailure("no device certificate") }
+        try stream(call, .deviceRequest) { [unowned self] in try deviceRequest(connection) }
+      }
       .stream("hub/devices/pending") { [unowned self] call in try stream(call, .pending) { [unowned self] in registry.pending } }
       .post("hub/device/approve") { [unowned self] call in try approve(call.body?["id"]?.string) }
       .post("hub/device/rename") { [unowned self] call in
@@ -874,8 +1001,9 @@ final class Hub: @unchecked Sendable {
         return nil
       }
       .stream("hub/devices/data") { [unowned self] call in
-        guard let id = call.body?["id"]?.string, registry.device(id) != nil else { throw ChannelFailure("device not found") }
-        try stream(call, .deviceData(id)) { [unowned self] in liveData[id] ?? [:] }
+        // The same answer for a device that's hidden as for one that doesn't exist
+        guard let id = call.body?["id"]?.string, seesLiveData(caller(call.peer), id) else { throw ChannelFailure("device not found") }
+        try stream(call, .deviceData(id)) { [unowned self] in seesLiveData(caller(call.peer), id) ? (liveData[id] ?? [:]) : [:] }
       }
   }
 }

@@ -43,9 +43,12 @@ enum HubCrypto {
   static func deviceId(spki: String) -> String {
     String(hex(sha256(Data(base64Encoded: spki) ?? Data())).prefix(32))
   }
-  /// `ddd ddd` from the first 8 hex characters of SHA-256 of the SPKI DER bytes
-  static func safetyCode(spki: String) -> String {
-    let hash = sha256(Data(base64Encoded: spki) ?? Data())
+  /// What a device's safety code covers besides its key: 32 random bytes, picked once the hub has the key
+  static func newCodeValue() -> String { base64URLEncode(Data(randomBytes(32))) }
+  /// Six digits shown as `ddd ddd` on the device and to the owner approving it. The value comes from the hub after it
+  /// has the key, so a key can't be ground offline to match a code: each guess costs one request.
+  static func safetyCode(hubKey: String, key: String, codeValue: String) -> String {
+    let hash = sha256(Data("hubcode1:\(hubKey):\(key):\(codeValue)".utf8))
     let value = UInt32(hash[0]) << 24 | UInt32(hash[1]) << 16 | UInt32(hash[2]) << 8 | UInt32(hash[3])
     let digits = String(value % 1_000_000)
     let code = String(repeating: "0", count: 6 - digits.count) + digits

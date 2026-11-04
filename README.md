@@ -93,7 +93,9 @@ protocol.md sections 1–12:
 - `default-deny`/`default-allow` with every built-in API classified, grants (`hub/grant*`, the old `hub/call/*`
   on top of them, `hub/grant/check` for services' own permissions), error codes (`unauthorized`, `forbidden`,
   `not_found`, `unavailable`), groups (`hub/group/*`, `hub/groups`, several groups per member, person groups, `owners`)
-- device certificates, `devices.json`, pending devices with safety codes, approve, rename, remove, revoke (with
+- device certificates, `devices.json`, pending devices with safety codes that cover a value the hub picks
+  (`hub/device/request`, one new request a second, 256 pending at most), unique names, a directory filtered per caller,
+  approve, rename, remove, revoke (with
   tombstones and revoked keys), the reporter role, `hub/device/describe` (with signed SSH host keys) and live data
 - `hub/api`, `hub/api/services`, `hub/status`, `hub/status/badges`, `hub/connections`, `hub/header`,
   `hub/profile/update`, `hub/key`, `hub/security/mode*`

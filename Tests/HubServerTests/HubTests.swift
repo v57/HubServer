@@ -17,7 +17,9 @@ final class VectorTests: XCTestCase {
     }
     let device = vectors["keys"]!["device"]!
     XCTAssertEqual(HubCrypto.deviceId(spki: device["publicKey"]!.string!), device["deviceId"]!.string)
-    XCTAssertEqual(HubCrypto.safetyCode(spki: device["publicKey"]!.string!), device["safetyCode"]!.string)
+    for vector in vectors["safetyCode"]!["cases"]!.array! {
+      XCTAssertEqual(HubCrypto.safetyCode(hubKey: vector["hubKey"]!.string!, key: vector["deviceKey"]!.string!, codeValue: vector["codeValue"]!.string!), vector["code"]!.string)
+    }
   }
 
   func testAuthTokens() throws {
@@ -167,6 +169,8 @@ final class SecurityTests: XCTestCase {
   func testBuiltinAccess() {
     XCTAssertEqual(builtinAccess("hub/info"), .open)
     XCTAssertEqual(builtinAccess("hub/pair"), .auth)
+    XCTAssertEqual(builtinAccess("hub/profile/update"), .auth)
+    XCTAssertEqual(builtinAccess("hub/device/request"), .auth)
     XCTAssertEqual(builtinAccess("hub/api/services"), .auth)
     XCTAssertEqual(builtinAccess("hub/device/data"), .reporter)
     XCTAssertEqual(builtinAccess("hub/devices"), .grant)

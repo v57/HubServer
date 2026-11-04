@@ -64,6 +64,10 @@ struct StoredDevice {
   var name: String
   /// An owner renamed it, the device's own suggestions no longer apply
   var nameByOwner = false
+  /// What it asked for, when the name it holds differs
+  var askedName: String?
+  /// What its safety code covers besides its key, picked by the hub. A revoked device from before these may have none.
+  var codeValue: String?
   var platform: String?
   var os: String?
   var arch: String?
@@ -87,6 +91,8 @@ struct StoredDevice {
     self.key = key
     name = json["name"]?.string ?? ""
     nameByOwner = json["nameByOwner"] == .bool(true)
+    askedName = json["askedName"]?.string
+    codeValue = json["codeValue"]?.string
     platform = json["platform"]?.string
     os = json["os"]?.string
     arch = json["arch"]?.string
@@ -100,6 +106,8 @@ struct StoredDevice {
   var json: JSON {
     var object: JSONObject = ["key": .string(key), "name": .string(name)]
     if nameByOwner { object["nameByOwner"] = true }
+    if let askedName { object["askedName"] = .string(askedName) }
+    if let codeValue { object["codeValue"] = .string(codeValue) }
     if let platform { object["platform"] = .string(platform) }
     if let os { object["os"] = .string(os) }
     if let arch { object["arch"] = .string(arch) }
@@ -144,6 +152,9 @@ struct StoredService {
   }
 }
 
+/// Most pending requests a hub keeps. A guess against a code has to be on the list when the owner compares.
+let maxPendingDevices = 256
+
 /// `devices.json`: devices, where each service key runs, and the keys revoked with a device
 final class DeviceRegistry {
   private(set) var devices: [String: StoredDevice] = [:]
@@ -154,8 +165,11 @@ final class DeviceRegistry {
   private(set) var revokedKeys: [String] = []
   let store: JSONStore
   var onChange: () -> Void = {}
+  /// The hub's key, which safety codes cover
+  let hubKey: String
 
-  init(storage: Storage) {
+  init(storage: Storage, hubKey: String) {
+    self.hubKey = hubKey
     store = storage.store("devices.json")
     store.encode = { [unowned self] in
       ["schema": 1,
@@ -177,6 +191,96 @@ final class DeviceRegistry {
       }
       revokedKeys = data["revokedKeys"]?.strings ?? []
     }
+    if !store.corrupt && settleStored() { store.writeNow() }
+  }
+
+  /// Stores from before names were unique and codes covered a value: every device gets a value, and of approved devices
+  /// with the same name the one that came first keeps it. Names an owner set stay, even two of the same.
+  private func settleStored() -> Bool {
+    var changed = false
+    for id in order where devices[id]?.codeValue == nil && devices[id]?.revoked == nil {
+      devices[id]?.codeValue = HubCrypto.newCodeValue()
+      changed = true
+    }
+    let holders = order.filter { devices[$0]?.approved == true && devices[$0]?.revoked == nil }.sorted { a, b in
+      let left = devices[a]!.createdAt, right = devices[b]!.createdAt
+      return left == right ? a < b : left < right
+    }
+    var held = Set(holders.compactMap { id in devices[id]!.nameByOwner ? normalizeName(devices[id]!.name) : nil })
+    for id in holders where !devices[id]!.nameByOwner {
+      let current = devices[id]!.name
+      let name = freeName(current) { held.contains($0) }
+      if !name.unicodeScalars.elementsEqual(current.unicodeScalars) {
+        devices[id]!.askedName = current
+        devices[id]!.name = name
+        changed = true
+      }
+      held.insert(normalizeName(name))
+    }
+    let pending = pendingIds()
+    for id in pending.prefix(max(0, pending.count - maxPendingDevices)) {
+      devices[id] = nil
+      order.removeAll { $0 == id }
+      changed = true
+    }
+    return changed
+  }
+
+  /// The names approved devices hold, normalized, except `id`'s. A pending request or a revoked device holds none.
+  private func heldNames(except id: String?) -> [String: String] {
+    var held: [String: String] = [:]
+    for other in order where other != id {
+      guard let device = devices[other], device.approved, device.revoked == nil else { continue }
+      held[normalizeName(device.name)] = other
+    }
+    return held
+  }
+
+  private func availableName(for id: String, asked: String) -> String {
+    let held = heldNames(except: id)
+    return freeName(asked) { held[$0] != nil }
+  }
+
+  /// A device suggests a name for itself: a pending one shows what it asks for, an approved one gets a free name
+  private func suggest(_ id: String, _ asked: String) {
+    guard let device = devices[id], !device.nameByOwner else { return }
+    let clean = cleanName(asked)
+    if !device.approved {
+      devices[id]!.name = clean
+    } else if clean != device.askedName ?? device.name {
+      devices[id]!.askedName = clean
+      devices[id]!.name = availableName(for: id, asked: clean)
+    }
+  }
+
+  /// Approved from now on: a request gets its final name here
+  private func settle(_ id: String) {
+    guard let device = devices[id], !device.approved else { return }
+    devices[id]!.approved = true
+    if device.nameByOwner {
+      try? claim(id, device.name)
+    } else {
+      let name = availableName(for: id, asked: device.name)
+      if name != device.name { devices[id]!.askedName = device.name }
+      devices[id]!.name = name
+    }
+  }
+
+  /// An owner's name: a device that only asked for the same one moves to a free name. Against a name an owner set, the
+  /// newer one gets the suffix, for an approval that has no one to ask, or `name taken` for a rename.
+  private func claim(_ id: String, _ name: String, refuse: Bool = false) throws {
+    let holder = heldNames(except: id)[normalizeName(name)]
+    if let holder, devices[holder]?.nameByOwner == true {
+      if refuse { throw ChannelFailure("name taken") }
+      devices[id]!.name = availableName(for: id, asked: name)
+      return
+    }
+    devices[id]!.name = name
+    if let holder {
+      let asked = devices[holder]!.askedName ?? devices[holder]!.name
+      devices[holder]!.askedName = asked
+      devices[holder]!.name = availableName(for: holder, asked: asked)
+    }
   }
   private func save() {
     store.save()
@@ -193,18 +297,18 @@ final class DeviceRegistry {
     if var device = devices[id] {
       if device.revoked != nil { return nil }
       device.lastSeen = now
-      if let name = certificate.deviceName, !device.nameByOwner { device.name = name }
       if let platform = certificate.platform { device.platform = platform }
       if let parent = certificate.parent { device.parent = parent }
-      if approve { device.approved = true }
       devices[id] = device
+      if let name = certificate.deviceName { suggest(id, name) }
     } else {
-      var device = StoredDevice(key: certificate.device, name: certificate.deviceName ?? certificate.instance,
+      var device = StoredDevice(key: certificate.device, name: cleanName(certificate.deviceName ?? certificate.instance),
         platform: certificate.platform, parent: certificate.parent, now: now)
-      device.approved = approve
+      device.codeValue = HubCrypto.newCodeValue()
       devices[id] = device
       order.append(id)
     }
+    if approve { settle(id) }
     save()
     return devices[id]
   }
@@ -223,29 +327,34 @@ final class DeviceRegistry {
 
   @discardableResult
   func approve(_ id: String?) throws -> StoredDevice {
-    var device = try require(id)
+    let device = try require(id)
     if device.revoked != nil { throw ChannelFailure("device revoked") }
-    device.approved = true
-    devices[id!] = device
+    settle(id!)
     save()
-    return device
+    return devices[id!]!
   }
 
   func rename(_ id: String?, _ name: JSON?) throws {
     guard let name = name?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty, name.utf8.count <= 64 else {
       throw ChannelFailure("invalid name")
     }
-    var device = try require(id)
-    device.name = name
-    device.nameByOwner = true
-    devices[id!] = device
+    let device = try require(id)
+    let clean = cleanName(name)
+    if device.approved {
+      try claim(id!, clean, refuse: true)
+    } else {
+      devices[id!]!.name = clean
+    }
+    devices[id!]!.nameByOwner = true
+    devices[id!]!.askedName = nil
     save()
   }
 
   /// What the reporter describes
   func update(_ id: String, name: String?, os: String?, arch: String?, capabilities: JSON?) throws {
-    var device = try require(id)
-    if let name, !device.nameByOwner { device.name = name }
+    _ = try require(id)
+    if let name { suggest(id, name) }
+    var device = devices[id]!
     if let os { device.os = os }
     if let arch { device.arch = arch }
     if let capabilities { device.capabilities = capabilities }
@@ -292,14 +401,130 @@ final class DeviceRegistry {
       var object: JSONObject = ["id": .string(id), "key": .string(device.key), "name": .string(device.name)]
       if let platform = device.platform { object["platform"] = .string(platform) }
       if let parent = device.parent { object["parent"] = .string(parent) }
-      object["safetyCode"] = .string(HubCrypto.safetyCode(spki: device.key))
+      let value = codeValue(id)
+      object["safetyCode"] = .string(HubCrypto.safetyCode(hubKey: hubKey, key: device.key, codeValue: value))
+      object["codeValue"] = .string(value)
       object["firstSeen"] = .string(device.createdAt)
       return .object(object)
     })
+  }
+
+  /// Its value, which it keeps once picked
+  func codeValue(_ id: String) -> String {
+    if let value = devices[id]?.codeValue { return value }
+    let value = HubCrypto.newCodeValue()
+    devices[id]?.codeValue = value
+    return value
+  }
+
+  /// The ids of pending requests, oldest first
+  func pendingIds() -> [String] {
+    order.filter { devices[$0]?.approved == false && devices[$0]?.revoked == nil }.sorted { devices[$0]!.createdAt < devices[$1]!.createdAt }
   }
 
   private func require(_ id: String?) throws -> StoredDevice {
     guard let id, let device = devices[id] else { throw ChannelFailure("device not found") }
     return device
   }
+}
+
+/// A connection that asks to be approved and waits its turn
+struct WaitingRequest {
+  var certificate: Certificate
+  var connection: HubConnection
+  var deviceId: String { certificate.deviceId }
+}
+
+/// The one way a new device gets on the pending list: one request a second for the whole hub, sources taking turns, so
+/// rotating addresses doesn't buy guesses and one flooding address doesn't push others out. A flood delays a real
+/// request. What waits is bounded; a request beyond that isn't queued, and the connection asks again when its stream
+/// recomputes or it reconnects. Confined to the hub's queue.
+final class RequestGate {
+  private static let maxWaitingPerSource = 8
+  private static let maxWaitingSources = 4096
+  /// Seconds between requests
+  var interval: TimeInterval = 1
+  /// Sources, whose turn is next first
+  private var sources: [String] = []
+  private var waiting: [String: [WaitingRequest]] = [:]
+  private var lastAdmission: TimeInterval = -.infinity
+  private var timerSet = false
+  private let queue: DispatchQueue
+  var admit: (WaitingRequest) -> Void = { _ in }
+
+  init(queue: DispatchQueue) {
+    self.queue = queue
+  }
+
+  func has(_ deviceId: String) -> Bool {
+    waiting.values.contains { $0.contains { $0.deviceId == deviceId } }
+  }
+
+  /// Queues a request, once per device. Admits at once while the hub is idle.
+  func ask(_ source: String, _ request: WaitingRequest) {
+    if has(request.deviceId) { return }
+    if let queued = waiting[source] {
+      if queued.count >= Self.maxWaitingPerSource { return }
+      waiting[source]!.append(request)
+    } else {
+      if sources.count >= Self.maxWaitingSources { return }
+      waiting[source] = [request]
+      sources.append(source)
+    }
+    next()
+  }
+
+  /// Forgets what `matches` picks: its connection went, or it needs no turn any more
+  func forget(_ matches: (WaitingRequest) -> Bool) {
+    for (source, requests) in waiting {
+      let left = requests.filter { !matches($0) }
+      if left.isEmpty {
+        waiting[source] = nil
+        sources.removeAll { $0 == source }
+      } else {
+        waiting[source] = left
+      }
+    }
+  }
+
+  private func next() {
+    guard !timerSet, let source = sources.first else { return }
+    let wait = lastAdmission + interval - ProcessInfo.processInfo.systemUptime
+    if wait > 0 {
+      timerSet = true
+      queue.asyncAfter(deadline: .now() + wait) { [weak self] in
+        self?.timerSet = false
+        self?.next()
+      }
+      return
+    }
+    var requests = waiting[source]!
+    let request = requests.removeFirst()
+    // The source goes to the end of the line
+    sources.removeFirst()
+    if requests.isEmpty {
+      waiting[source] = nil
+    } else {
+      waiting[source] = requests
+      sources.append(source)
+    }
+    lastAdmission = ProcessInfo.processInfo.systemUptime
+    admit(request)
+    next()
+  }
+}
+
+/// The address a request counts against: IPv4, or the /64 of IPv6, which is what one host usually has. Behind a proxy
+/// every request has the proxy's address, so they share one turn; the hub trusts no forwarded header, as a client could
+/// send any, and the limit for the whole hub holds either way. A host that gives no address shares one turn too.
+func requestSource(_ address: String?) -> String {
+  guard let address, !address.isEmpty else { return "unknown" }
+  let plain = String(address.split(separator: "%", omittingEmptySubsequences: false)[0]).lowercased()
+  if plain.hasPrefix("::ffff:"), plain.contains(".") { return String(plain.dropFirst(7)) }
+  if !plain.contains(":") { return plain }
+  let parts = plain.components(separatedBy: "::")
+  let leading = parts[0].isEmpty ? [] : parts[0].components(separatedBy: ":")
+  let trailing = parts.count > 1 && !parts[1].isEmpty ? parts[1].components(separatedBy: ":") : []
+  let groups = leading + Array(repeating: "0", count: max(0, 8 - leading.count - trailing.count)) + trailing
+  return groups.prefix(4).map { String(Int($0, radix: 16) ?? 0, radix: 16) }.joined(separator: ":") + "::/64"
 }

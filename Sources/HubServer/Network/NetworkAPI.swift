@@ -23,6 +23,8 @@ final class NetworkAPI {
   var onBindApprove: (HubConnection) -> Void = { _ in }
   /// Device names for member DNS names
   var deviceLabel: (String) -> String? = { _ in nil }
+  /// The device a service key runs on, set by the hub
+  var serviceDevice: (String) -> String? = { _ in nil }
   /// The SSH port a device reports in `capabilities.ssh`
   var deviceSSHPort: (String) -> Int? = { _ in nil }
 
@@ -641,6 +643,7 @@ final class NetworkAPI {
     let keys = Set(connected.map(\.key))
     let online: [JSON] = connected.map { profile in
       var object = profile.json.object!
+      if let name = profileName(agentDevices[profile.key], profile.name) { object["name"] = .string(name) }
       object["online"] = true
       if let device = agentDevices[profile.key] { object["deviceAuthority"] = .string(deviceAuthority(device, fallback: profile.name)) }
       return .object(object)
@@ -650,7 +653,7 @@ final class NetworkAPI {
         "member": .string(entry.key)]
       if let device = entry.member.device { object["device"] = .string(device) }
       object["wireGuardKey"] = .string(entry.member.wireGuardKey)
-      if let name = entry.member.name { object["name"] = .string(name) }
+      if let name = profileName(entry.member.device, entry.member.name) { object["name"] = .string(name) }
       if let platform = entry.member.platform { object["platform"] = .string(platform) }
       object["overlayAddresses"] = JSON(entry.addresses)
       object["connectedAt"] = .string(entry.member.lastSeen)
@@ -659,6 +662,29 @@ final class NetworkAPI {
       return .object(object)
     }
     return online + offline
+  }
+
+  /// A profile's name: a device's is the one the hub gave it, not what its agent says
+  private func profileName(_ device: String?, _ name: String?) -> String? {
+    device.flatMap(deviceLabel) ?? name
+  }
+
+  /// The devices a member's directory shows for Hub Network: those fronting a share the caller may open, with the shares'
+  /// ports, and those offering it their internet
+  func devicesSharedWith(_ connection: HubConnection) -> [String: Set<Int>] {
+    var devices: [String: Set<Int>] = [:]
+    for resource in registry.allResources where canAccessShare(resource, connection) {
+      if let placed = serviceDevice(resource.ownerKey), devices[placed] == nil { devices[placed] = [] }
+      for provider in agents.providers(of: resource.resourceId) {
+        if let device = agentDevices[provider.key] { devices[device, default: []].insert(provider.port) }
+      }
+    }
+    if canUseGatewayAPI(connection) {
+      for key in gateways.keys {
+        if let device = agentDevices[key], devices[device] == nil { devices[device] = [] }
+      }
+    }
+    return devices
   }
 
   func deviceAuthority(_ device: String, fallback: String?) -> String {
@@ -690,6 +716,7 @@ final class NetworkAPI {
     visible.formUnion(gatewayKeys)
     return agents.listProfiles.filter { visible.contains($0.key) }.map { profile in
       var object = profile.json.object!
+      if let name = profileName(agentDevices[profile.key], profile.name) { object["name"] = .string(name) }
       if !gatewayKeys.contains(profile.key) { object["wireGuardKey"] = "" }
       return .object(object)
     }

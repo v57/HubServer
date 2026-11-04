@@ -13,6 +13,8 @@ final class HubConnection {
   var services = Set<String>()
   var apps = Set<String>()
   let ip: String?
+  /// The address the transport saw, nil when it gives none. `ip` can come from a header in that case.
+  var remoteAddress: String?
   /// Device id, when the connection has a certificate from an approved device
   var device: String?
   /// Instance name from the certificate of a device connection

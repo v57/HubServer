@@ -14,12 +14,13 @@ enum BuiltinAccess {
 }
 
 private let publicBuiltins: Set<String> = [
-  "hub/info", "hub/profile/update", "hub/service/update", "hub/api", "hub/status", "hub/status/badges",
+  "hub/info", "hub/service/update", "hub/api", "hub/status", "hub/status/badges",
   "hub/proxy/join", "hub/header",
 ]
 // `hub/net/bind` keeps the proof of its bind kind, `hub/net/node` tells agents where their node is, `hub/pair`
-// takes any keyed caller (section 12)
-private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check"]
+// takes any keyed caller (section 12), `hub/profile/update` labels the caller's own connection,
+// `hub/device/request` answers for its own certificate
+private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check", "hub/profile/update", "hub/device/request"]
 private let reporterBuiltins: Set<String> = ["hub/device/describe", "hub/device/data"]
 private let grantBuiltins: Set<String> = ["hub/devices", "hub/devices/data"]
 
