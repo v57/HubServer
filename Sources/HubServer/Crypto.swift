@@ -102,16 +102,42 @@ public struct HubKeyPair: Sendable {
     try atomicWrite(Data(key.fileText.utf8), to: url, mode: 0o600)
     return key
   }
+  /// The key of a hub whose app keeps it in its own secure store: there already, or moved there from the key file,
+  /// or new. `load` is nil only when the store has no key: an error from it stops here, since making a new key would
+  /// change the hub's identity for every device that pinned it. The file goes only once the store gives the key back,
+  /// and a file that differs from the store wins, since it belongs with the hub's data beside it.
+  public static func moved(
+    from file: URL,
+    load: () throws -> Data?,
+    save: (Data) throws -> Void
+  ) throws -> HubKeyPair {
+    let stored = try load().map { try HubKeyPair(privateKey: Curve25519.Signing.PrivateKey(rawRepresentation: $0)) }
+    let fileKey: HubKeyPair? =
+      FileManager.default.fileExists(atPath: file.path)
+      ? try HubKeyPair(fileText: String(contentsOf: file, encoding: .utf8)) : nil
+    if let stored, fileKey == nil { return stored }
+    let key = fileKey ?? HubKeyPair()
+    let raw = key.privateKey.rawRepresentation
+    if stored?.privateKey.rawRepresentation != raw {
+      try save(raw)
+      guard try load() == raw else { throw HubServerError.keyNotStored }
+    }
+    // Still there after a failure: the next start finds the same key in both and tries again
+    if fileKey != nil { try? FileManager.default.removeItem(at: file) }
+    return key
+  }
 }
 
 public enum HubServerError: Error, CustomStringConvertible {
   case invalidKeyFile
+  case keyNotStored
   case notRunning
   case alreadyRunning
   case listen(String)
   public var description: String {
     switch self {
     case .invalidKeyFile: "invalid key file"
+    case .keyNotStored: "the key store didn't keep the hub's key"
     case .notRunning: "the hub isn't running"
     case .alreadyRunning: "the hub is already running"
     case .listen(let reason): "listen failed: \(reason)"

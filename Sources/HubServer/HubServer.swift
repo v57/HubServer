@@ -14,6 +14,9 @@ public final class HubServer: @unchecked Sendable {
   public struct Configuration: Sendable {
     /// Where the hub keeps its key (`auth`) and stores, like hub-server's `data/`. Created if missing (0700).
     public var dataDirectory: URL
+    /// The hub's key when the app keeps it itself, as the Hub app does in the keychain (`HubKeyPair.moved`). `nil`:
+    /// the `auth` file in `dataDirectory`.
+    public var key: HubKeyPair?
     /// 1997 on every interface by default. Local mode always listens on 127.0.0.1.
     public var listen = ListenAddress(port: 1997)
     /// Local mode (protocol.md section 12): 127.0.0.1 only, `default-allow`, the launcher key is an owner, no pairing.

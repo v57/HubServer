@@ -170,4 +170,102 @@ final class SecurityTests: XCTestCase {
     guard case .failure(let invalidated) = pairing.verify(.string(next.code)) else { return XCTFail() }
     XCTAssertEqual(invalidated.message, "no pairing code")
   }
+
+  // MARK: A key the host keeps
+
+  /// A store that remembers one key, as the keychain does
+  private final class KeyStore {
+    var data: Data?
+    var failsLoading = false
+    var dropsSaves = false
+    var saves = 0
+    func load() throws -> Data? {
+      if failsLoading { throw HubServerError.invalidKeyFile }
+      return data
+    }
+    func save(_ new: Data) {
+      saves += 1
+      if !dropsSaves { data = new }
+    }
+  }
+
+  private func temporaryFile() throws -> URL {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+    return folder.appendingPathComponent("auth")
+  }
+
+  private func moved(_ file: URL, _ store: KeyStore) throws -> HubKeyPair {
+    try HubKeyPair.moved(from: file, load: store.load, save: store.save)
+  }
+
+  func testAKeyFileMovesIntoTheStoreAndKeepsTheHubsIdentity() throws {
+    let file = try temporaryFile()
+    let old = try HubKeyPair.loadOrCreate(file)
+    let store = KeyStore()
+    XCTAssertEqual(try moved(file, store).publicKey, old.publicKey)
+    XCTAssertEqual(store.data, old.privateKey.rawRepresentation)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    // and the next start finds it there, without saving again
+    XCTAssertEqual(try moved(file, store).publicKey, old.publicKey)
+    XCTAssertEqual(store.saves, 1)
+  }
+
+  func testAFirstStartMakesOneKeyInTheStoreAndNoFile() throws {
+    let file = try temporaryFile()
+    let store = KeyStore()
+    let key = try moved(file, store)
+    XCTAssertEqual(store.data, key.privateKey.rawRepresentation)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    XCTAssertEqual(try moved(file, store).publicKey, key.publicKey)
+  }
+
+  func testAStoreThatCantBeReadNeverGetsANewKey() throws {
+    let file = try temporaryFile()
+    let old = try HubKeyPair.loadOrCreate(file)
+    let store = KeyStore()
+    store.failsLoading = true
+    XCTAssertThrowsError(try moved(file, store))
+    XCTAssertEqual(store.saves, 0)
+    XCTAssertEqual(try HubKeyPair.loadOrCreate(file).publicKey, old.publicKey)
+  }
+
+  func testTheFileStaysWhenTheStoreDidntKeepTheKey() throws {
+    let file = try temporaryFile()
+    let old = try HubKeyPair.loadOrCreate(file)
+    let store = KeyStore()
+    store.dropsSaves = true
+    XCTAssertThrowsError(try moved(file, store))
+    XCTAssertEqual(try HubKeyPair.loadOrCreate(file).publicKey, old.publicKey)
+  }
+
+  func testAFileLeftBesideTheSameKeyInTheStoreGoes() throws {
+    let file = try temporaryFile()
+    let old = try HubKeyPair.loadOrCreate(file)
+    let store = KeyStore()
+    store.data = old.privateKey.rawRepresentation
+    XCTAssertEqual(try moved(file, store).publicKey, old.publicKey)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    XCTAssertEqual(store.saves, 0)
+  }
+
+  func testAFileThatDiffersFromTheStoreWinsSinceItBelongsWithTheHubsData() throws {
+    let file = try temporaryFile()
+    let old = try HubKeyPair.loadOrCreate(file)
+    let store = KeyStore()
+    store.data = HubKeyPair().privateKey.rawRepresentation
+    XCTAssertEqual(try moved(file, store).publicKey, old.publicKey)
+    XCTAssertEqual(store.data, old.privateKey.rawRepresentation)
+  }
+
+  func testAHubWithAKeyFromItsHostWritesNoKeyFile() throws {
+    let directory = try temporaryFile().deletingLastPathComponent()
+    let key = HubKeyPair()
+    var configuration = HubServer.Configuration(dataDirectory: directory)
+    configuration.key = key
+    let hub = try Hub(configuration: configuration, queue: DispatchQueue(label: "test"), log: { _ in })
+    XCTAssertEqual(hub.hubKey, key.publicKey)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("auth").path))
+  }
 }

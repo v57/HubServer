@@ -56,7 +56,7 @@ try await server.addOwner(key)                           // a key or device SPKI
 await server.stop()                                      // closes connections, writes pending changes
 ```
 
-- **Data directory:** the host picks it. It holds `auth` (the hub key, 0600), the JSON stores and the pairing files,
+- **Data directory:** the host picks it. It holds `auth` (the hub key, 0600, unless the host keeps the key itself: `Configuration.key`, `HubKeyPair.moved`), the JSON stores and the pairing files,
   in hub-server's formats, written through a temp file and a rename. Keep it across launches: the hub key is what
   clients pin.
 - **Owner pairing:** a hub without owners makes a code at start (`pairsAtStart`, on by default) and shows it in

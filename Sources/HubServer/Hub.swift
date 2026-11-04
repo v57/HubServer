@@ -48,7 +48,7 @@ final class Hub: @unchecked Sendable {
     let keyExisted = FileManager.default.fileExists(atPath: keyURL.path)
     // A hub that ran before had its key file, even without `hub.json`
     let ranBefore = keyExisted || FileManager.default.fileExists(atPath: storage.url("hub.json").path)
-    key = try HubKeyPair.loadOrCreate(keyURL)
+    key = try configuration.key ?? HubKeyPair.loadOrCreate(keyURL)
     security = Security(storage: storage, hubKey: key.publicKey)
     registry = DeviceRegistry(storage: storage)
     pairing = Pairing(directory: configuration.dataDirectory, log: log)
