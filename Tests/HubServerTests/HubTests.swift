@@ -25,20 +25,93 @@ final class VectorTests: XCTestCase {
     let expiry = vectors["auth"]!["expiry"]!.int!
     let security = try makeSecurity(hubKey: hubKey)
     let service = vectors["keys"]!["service"]!["publicKey"]!.string!
+    try security.setMode(["requireV1": false])
     XCTAssertEqual(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 60), service)
-    XCTAssertEqual(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry - 60), service)
-    // A v1 token is bound to its hub, a v0 token isn't a v1 one
-    XCTAssertThrowsError(try makeSecurity(hubKey: service).verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry - 60))
+    // Expiry of a v0 token: 30 s of skew both ways, at most 300 s ahead
+    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry + 29))
+    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry + 30))
+    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 330))
+    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 331))
+    try security.setMode(["requireV1": true])
+    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 60)) { error in
+      XCTAssertEqual((error as? ChannelFailure)?.message, "unsupported version")
+    }
+    // A v0 token isn't a v1 one, and a v1 token needs a nonce of this hub's
     XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "1", now: expiry - 60))
-    // Expiry: 30 s of skew both ways, at most 300 s ahead
-    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry + 29))
-    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry + 30))
-    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry - 330))
-    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry - 331))
+    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "1", now: expiry - 60)) { error in
+      XCTAssertEqual((error as? ChannelFailure)?.message, "invalid nonce")
+    }
     XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v1"]!["header"]!.string, version: "2", now: expiry - 60)) { error in
       XCTAssertEqual((error as? ChannelFailure)?.message, "unsupported version")
     }
     XCTAssertNil(try security.verifyToken(nil, version: nil))
+  }
+
+  func testV1TokensSignANonceAndWorkOnce() throws {
+    let hub = HubKeyPair(), other = HubKeyPair(), service = HubKeyPair()
+    let security = try makeSecurity(hubKey: hub.publicKey)
+    let now = Int(Date().timeIntervalSince1970)
+    func token(_ nonce: String, hubKey: String? = nil, key: HubKeyPair? = nil, expiry: Int? = nil) -> String {
+      let key = key ?? service, expiry = expiry ?? now + 30
+      return "key.\(key.publicKey).\(key.sign("hub1:\(hubKey ?? hub.publicKey):\(nonce):\(expiry)")).\(expiry).\(nonce)"
+    }
+    let nonce = security.nonces.issue(now: now)
+    XCTAssertEqual(try security.verifyToken(token(nonce), version: "1", now: now), service.publicKey)
+    // Replayed, also with the nonce under another key
+    XCTAssertThrowsError(try security.verifyToken(token(nonce), version: "1", now: now))
+    XCTAssertThrowsError(try security.verifyToken(token(nonce, key: other), version: "1", now: now))
+    // Signed for another hub: refused, and the nonce stays free
+    let second = security.nonces.issue(now: now)
+    XCTAssertThrowsError(try security.verifyToken(token(second, hubKey: other.publicKey), version: "1", now: now))
+    let used = security.nonces.usedCount
+    XCTAssertEqual(security.nonces.usedCount, used)
+    XCTAssertNoThrow(try security.verifyToken(token(second), version: "1", now: now))
+    // Longer than a nonce lasts
+    XCTAssertThrowsError(try security.verifyToken(token(security.nonces.issue(now: now), expiry: now + 300), version: "1", now: now))
+    // After the nonce's own expiry
+    let old = security.nonces.issue(now: now)
+    XCTAssertThrowsError(try security.verifyToken(token(old, expiry: now + 90), version: "1", now: now + nonceLifetime))
+    // Not this hub's
+    XCTAssertThrowsError(try security.verifyToken(token(TokenNonces().issue(now: now)), version: "1", now: now))
+    XCTAssertThrowsError(try security.verifyToken(token("a.b"), version: "1", now: now))
+  }
+
+  func testNoncesStayBounded() {
+    let nonces = TokenNonces(limit: 4)
+    let now = 1_800_000_000
+    for _ in 0..<1000 { _ = nonces.issue(now: now) }
+    XCTAssertEqual(nonces.usedCount, 0)
+    let used = (0..<4).map { _ in nonces.issue(now: now) }
+    for nonce in used { XCTAssertTrue(nonces.consume(nonce, now: now)) }
+    let waiting = nonces.issue(now: now)
+    // A full store changes the secret: nothing can come back
+    XCTAssertFalse(nonces.consume(nonces.issue(now: now), now: now))
+    XCTAssertEqual(nonces.usedCount, 0)
+    for nonce in used {
+      XCTAssertFalse(nonces.isValid(nonce, now: now))
+      XCTAssertFalse(nonces.consume(nonce, now: now))
+    }
+    XCTAssertFalse(nonces.isValid(waiting, now: now))
+    XCTAssertTrue(nonces.consume(nonces.issue(now: now), now: now))
+    // Expired entries make room without changing the secret
+    let later = TokenNonces(limit: 2)
+    let a = later.issue(now: now), b = later.issue(now: now)
+    XCTAssertTrue(later.consume(a, now: now))
+    XCTAssertTrue(later.consume(b, now: now))
+    let next = now + nonceLifetime + 1
+    XCTAssertTrue(later.consume(later.issue(now: next), now: next))
+    XCTAssertEqual(later.usedCount, 1)
+  }
+
+  func testStoredRequireV1FalseFromBeforeAuthV2CountsAsUnset() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory.appendingPathComponent("data"), withIntermediateDirectories: true)
+    let storage = Storage(directory: directory, queue: DispatchQueue(label: "test"), log: { _ in })
+    storages.append(storage)
+    try Data(#"{"security":{"mode":"default-allow","requireV1":false}}"#.utf8).write(to: storage.store("hub.json").url)
+    let security = Security(storage: storage, hubKey: HubKeyPair().publicKey)
+    security.load(hubKeyExisted: true)
+    XCTAssertTrue(security.requireV1)
   }
 
   func testCertificates() throws {

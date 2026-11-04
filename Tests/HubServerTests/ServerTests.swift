@@ -124,9 +124,19 @@ final class Once: @unchecked Sendable {
 }
 
 final class ServerTests: XCTestCase {
-  func auth(_ key: HubKeyPair, hubKey: String) -> [String: String] {
-    let expiry = Int(Date().timeIntervalSince1970) + 60
-    return ["v": "1", "auth": "key.\(key.publicKey).\(key.sign("hub1:\(hubKey):\(expiry)")).\(expiry)"]
+  /// A v1 token over a fresh challenge from the hub at `port`
+  func auth(_ key: HubKeyPair, hubKey: String, port: UInt16) async throws -> [String: String] {
+    let anonymous = TestClient(port: port)
+    defer { anonymous.close() }
+    let info = try await anonymous.post("hub/info", ["nonce": .string(Self.clientNonce())])
+    return token(key, hubKey: hubKey, nonce: info!["challenge"]!.string!)
+  }
+  func token(_ key: HubKeyPair, hubKey: String, nonce: String, lifetime: Int = 30) -> [String: String] {
+    let expiry = Int(Date().timeIntervalSince1970) + lifetime
+    return ["v": "1", "auth": "key.\(key.publicKey).\(key.sign("hub1:\(hubKey):\(nonce):\(expiry)")).\(expiry).\(nonce)"]
+  }
+  static func clientNonce() -> String {
+    HubCrypto.base64URLEncode(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
   }
   func certificate(device: HubKeyPair, service: HubKeyPair, instance: String) -> String {
     let now = Int(Date().timeIntervalSince1970)
@@ -155,10 +165,10 @@ final class ServerTests: XCTestCase {
     XCTAssertEqual(info?["mode"], "default-deny")
 
     // A device-certified service asks to host a path; the owner approves hosting and the device
-    let provider = TestClient(port: port, headers: auth(service, hubKey: hubKey).merging(["device": certificate(device: device, service: service, instance: "test/echo")]) { $1 })
+    let provider = TestClient(port: port, headers: try await auth(service, hubKey: hubKey, port: port).merging(["device": certificate(device: device, service: service, instance: "test/echo")]) { $1 })
     provider.handlers["test/echo"] = { body in body }
     _ = try await provider.post("hub/service/update", ["services": [["path": "test/echo"]], "reporter": true])
-    let ownerClient = TestClient(port: port, headers: auth(owner, hubKey: hubKey))
+    let ownerClient = TestClient(port: port, headers: try await auth(owner, hubKey: hubKey, port: port))
     let pending = try await ownerClient.values("hub/devices/pending")
     XCTAssertEqual(pending.first?.array?.first?["id"]?.string, HubCrypto.deviceId(spki: device.publicKey))
     _ = try await ownerClient.post("hub/host/update", ["key": .string(service.publicKey), "allow": ["test/echo"]])
@@ -184,7 +194,7 @@ final class ServerTests: XCTestCase {
     }
 
     // Default deny, then a grant
-    let strangerClient = TestClient(port: port, headers: auth(stranger, hubKey: hubKey))
+    let strangerClient = TestClient(port: port, headers: try await auth(stranger, hubKey: hubKey, port: port))
     do {
       _ = try await strangerClient.post("test/echo", 1)
       XCTFail("stranger allowed")
@@ -214,7 +224,7 @@ final class ServerTests: XCTestCase {
 
     // Revoking the device closes the service, its key is refused afterwards
     _ = try await ownerClient.post("hub/device/revoke", ["id": .string(HubCrypto.deviceId(spki: device.publicKey))])
-    let refused = TestClient(port: port, headers: auth(service, hubKey: hubKey))
+    let refused = TestClient(port: port, headers: try await auth(service, hubKey: hubKey, port: port))
     do {
       _ = try await refused.post("hub/info", timeout: 2)
       XCTFail("revoked key connected")
@@ -226,7 +236,7 @@ final class ServerTests: XCTestCase {
     let again = HubServer(configuration)
     let newPort = try await again.start()
     XCTAssertEqual(again.status.hubKey, hubKey)
-    let ownerAgain = TestClient(port: newPort, headers: auth(owner, hubKey: hubKey))
+    let ownerAgain = TestClient(port: newPort, headers: try await auth(owner, hubKey: hubKey, port: newPort))
     let mode = try await ownerAgain.values("hub/security/mode")
     XCTAssertEqual(mode.first?["mode"], "default-deny")
     let afterRestart = try await ownerAgain.values("hub/devices")
@@ -245,7 +255,7 @@ final class ServerTests: XCTestCase {
     let code = try XCTUnwrap(server.status.pairingCode)
     let hubKey = try XCTUnwrap(server.status.hubKey)
     let key = HubKeyPair()
-    let client = TestClient(port: port, headers: auth(key, hubKey: hubKey))
+    let client = TestClient(port: port, headers: try await auth(key, hubKey: hubKey, port: port))
     let result = try await client.post("hub/pair", ["code": .string(code.code)])
     XCTAssertEqual(result?["owner"], true)
     XCTAssertEqual(result?["hubKey"]?.string, hubKey)
@@ -273,7 +283,7 @@ final class ServerTests: XCTestCase {
     let server = HubServer(configuration)
     let port = try await server.start()
     XCTAssertNil(server.status.pairingCode)
-    let client = TestClient(port: port, headers: auth(launcher, hubKey: server.status.hubKey!))
+    let client = TestClient(port: port, headers: try await auth(launcher, hubKey: server.status.hubKey!, port: port))
     let info = try await client.post("hub/info")
     XCTAssertEqual(info?["mode"], "default-allow")
     // The launcher is an owner without being stored
@@ -303,7 +313,7 @@ final class NetworkServerTests: XCTestCase {
   // swift-corelibs-xctest's XCTestCase has no init()
   let helper = ServerTests(name: "helper") { _ in }
   #endif
-    let owners = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
+    let owners = TestClient(port: port, headers: try await helper.auth(owner, hubKey: hubKey, port: port))
 
     // v57's coordinator until an owner sets another
     let node = try await owners.values("hub/net/node")
@@ -314,16 +324,16 @@ final class NetworkServerTests: XCTestCase {
     _ = try await owners.post("hub/net/node/set", .null)
 
     // Revoking a device removes its member and tells the other agents
-    func agent(_ device: HubKeyPair, name: String) -> TestClient {
+    func agent(_ device: HubKeyPair, name: String) async throws -> TestClient {
       let key = HubKeyPair()
-      var headers = helper.auth(key, hubKey: hubKey)
+      var headers = try await helper.auth(key, hubKey: hubKey, port: port)
       headers["device"] = helper.certificate(device: device, service: key, instance: name)
       return TestClient(port: port, headers: headers)
     }
     let bind: (String) -> JSON = { ["version": 1, "bindingKind": "apple-app", "wireGuardKey": .string($0), "overlayAddresses": [],
       "connectedAt": .string(isoNow()), "name": "Agent Box"] }
-    let lost = agent(lostDevice, name: "lost")
-    let other = agent(otherDevice, name: "other")
+    let lost = try await agent(lostDevice, name: "lost")
+    let other = try await agent(otherDevice, name: "other")
     let lostBound = try await lost.post("hub/net/bind", bind("wg-lost"))
     XCTAssertEqual(lostBound?["profile"]?["overlayAddresses"]?.array?.count, 2)
     _ = try await other.post("hub/net/bind", bind("wg-other"))
@@ -344,7 +354,7 @@ final class NetworkServerTests: XCTestCase {
     XCTAssertTrue(members[0].array!.contains { $0["wireGuardKey"] == "wg-other" })
 
     // Test routes are owner-only
-    let user = TestClient(port: port, headers: helper.auth(HubKeyPair(), hubKey: hubKey))
+    let user = TestClient(port: port, headers: try await helper.auth(HubKeyPair(), hubKey: hubKey, port: port))
     do {
       _ = try await user.post("hub/net/test/complete", "ok")
       XCTFail("a user reached a test route")
@@ -382,7 +392,7 @@ final class PendingTests: XCTestCase {
     server = HubServer(configuration)
     port = try await server.start()
     hubKey = server.status.hubKey!
-    caller = TestClient(port: port, headers: helper.auth(owner, hubKey: hubKey))
+    caller = TestClient(port: port, headers: try await helper.auth(owner, hubKey: hubKey, port: port))
     clients = [caller]
   }
 
@@ -395,7 +405,7 @@ final class PendingTests: XCTestCase {
   /// A provider of `path`; hosting needs approval (`hub/host/update`) unless `approved`
   func provider(_ path: String, approved: Bool = true, limit: Int? = nil, handler: @escaping (JSON) -> JSON = { $0 }) async throws -> (key: HubKeyPair, client: TestClient) {
     let key = HubKeyPair()
-    let client = TestClient(port: port, headers: helper.auth(key, hubKey: hubKey))
+    let client = TestClient(port: port, headers: try await helper.auth(key, hubKey: hubKey, port: port))
     clients.append(client)
     client.handlers[path] = handler
     var header: JSONObject = ["path": .string(path)]

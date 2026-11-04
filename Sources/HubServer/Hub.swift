@@ -536,6 +536,8 @@ final class Hub: @unchecked Sendable {
 
   private func registerRoutes() {
     router.check = { [unowned self] _, path, peer, _ in
+      // A known client's way to its challenge: on a whitelisted hub an anonymous connection can do nothing else
+      if path != "hub/info", caller(peer).key == nil, security.whitelist.enforced { throw ChannelFailure("hub is not available") }
       guard builtinAccess(path) != nil else { return }
       try security.checkBuiltin(caller(peer), path)
     }
@@ -553,9 +555,16 @@ final class Hub: @unchecked Sendable {
 
   private func registerHubRoutes() {
     router
-      .post("hub/info") { [unowned self] _ in
-        var info: JSONObject = ["key": .string(hubKey), "protocol": 1, "pro": true, "mode": .string(security.effectiveMode.rawValue)]
+      .post("hub/info") { [unowned self] call in
+        var info: JSONObject = [
+          "key": .string(hubKey), "protocol": 2, "pro": true, "mode": .string(security.effectiveMode.rawValue),
+          "challenge": .string(security.nonces.issue()),
+        ]
         if let host = configuration.host { info["host"] = .string(host) }
+        if let nonce = call.body?["nonce"], !nonce.isNull {
+          guard let nonce = nonce.string, isClientNonce(nonce) else { throw ChannelFailure("invalid nonce") }
+          info["proof"] = .string(key.sign(hubInfoSignedData(hubKey: hubKey, nonce: nonce)))
+        }
         return .object(info)
       }
       .post("hub/pair", answering: { [unowned self] call in pair(call) })

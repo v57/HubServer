@@ -31,9 +31,15 @@ async function first<T>(it: AsyncIterable<T>, pred: (v: T) => boolean, ms = 5000
 try {
   const anon = new Channel<any>().connect(`ws://127.0.0.1:${port}`, { headers: () => ({}) })
   const info = await anon.send('hub/info')
-  const exp = () => Math.floor(Date.now() / 1000) + 60
+  const exp = () => Math.floor(Date.now() / 1000) + 30
   const ownerC = new Channel<any>().connect(`ws://127.0.0.1:${port}`, {
-    headers: () => { const e = exp(); return { v: '1', auth: `key.${owner.pub}.${sign(null, Buffer.from(`hub1:${info.key}:${e}`), owner.priv).toString('base64')}.${e}` } },
+    headers: async () => {
+      const e = exp()
+      const probe = new Channel<any>().connect(`ws://127.0.0.1:${port}`, { headers: () => ({}) })
+      const { challenge } = await probe.send('hub/info')
+      ;(probe as any).stop?.()
+      return { v: '1', auth: `key.${owner.pub}.${sign(null, Buffer.from(`hub1:${info.key}:${challenge}:${e}`), owner.priv).toString('base64')}.${e}.${challenge}` }
+    },
   })
 
   const { Service } = await import(SDK)
@@ -41,7 +47,7 @@ try {
   const svc = new Service({ name: 'E2E Echo', instance: 'e2e/sdk', reporter: true })
     .post('e2e/sdk', (_body: any, request: any) => { seen = request; return request?.caller ?? null })
     .start()
-  await wait(2500) // first connect v0 + hub/info pin + reconnect v1
+  await wait(2500) // hub/info, proof, pin, connect
 
   await check('SDK service appears as a pending device', async () => {
     const list: any[] = await first(ownerC.values('hub/devices/pending'), (l: any) => Array.isArray(l) && l.length > 0)

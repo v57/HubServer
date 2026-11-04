@@ -530,7 +530,7 @@ final class Whitelist {
 final class HubSettings {
   private(set) var data = JSONObject()
   private(set) var mode: SecurityMode = .defaultDeny
-  private(set) var requireV1 = false
+  private(set) var requireV1 = true
   let store: JSONStore
 
   init(storage: Storage) {
@@ -547,7 +547,8 @@ final class HubSettings {
       data = object
       storedMode = json["security"]?["mode"]?.string != nil
       mode = json["security"]?["mode"]?.string == SecurityMode.defaultDeny.rawValue ? .defaultDeny : .defaultAllow
-      requireV1 = json["security"]?["requireV1"] == .bool(true)
+      // Stores from before auth v2 hold `requireV1: false` that nobody chose; an owner turning it off writes allowV0
+      requireV1 = json["security"]?["allowV0"] != .bool(true)
     }
     if store.corrupt {
       data = [:]
@@ -564,7 +565,9 @@ final class HubSettings {
     if !existed || store.corrupt || !storedMode { store.writeNow() }
   }
   private func writeSecurity() {
-    data["security"] = ["mode": .string(mode.rawValue), "requireV1": .bool(requireV1)]
+    var security: JSONObject = ["mode": .string(mode.rawValue), "requireV1": .bool(requireV1)]
+    if !requireV1 { security["allowV0"] = true }
+    data["security"] = .object(security)
   }
   func setSecurity(mode: SecurityMode?, requireV1: Bool?) {
     let changed = (mode != nil && mode != self.mode) || (requireV1 != nil && requireV1 != self.requireV1)
@@ -600,6 +603,8 @@ final class Security {
   let names: PathNames
   let host: HostApprovals
   let whitelist: Whitelist
+  /// The challenges v1 tokens sign
+  let nonces = TokenNonces()
   let settings: HubSettings
   /// Per-key call requests waiting for an owner, in memory (`hub/call/pending`)
   private(set) var callPending = OrderedSets()
@@ -741,23 +746,25 @@ final class Security {
   func verifyToken(_ token: String?, version: String?, now: Int = Int(Date().timeIntervalSince1970)) throws -> String? {
     let version = version ?? "0"
     guard version == "0" || version == "1" else { throw ChannelFailure("unsupported version") }
-    guard let token, !token.isEmpty else {
-      if whitelist.enforced { throw ChannelFailure("hub is not available") }
-      return nil
-    }
+    // An anonymous connection on a whitelisted hub may only ask `hub/info`: that's how a known client gets its challenge
+    guard let token, !token.isEmpty else { return nil }
     if version == "0", requireV1 { throw ChannelFailure("unsupported version") }
     let parts = token.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-    guard parts.count == 4, parts[0] == "key" else { throw ChannelFailure("invalid key") }
-    let key = parts[1], signature = parts[2], time = parts[3]
+    guard parts.count == (version == "1" ? 5 : 4), parts[0] == "key" else { throw ChannelFailure("invalid key") }
+    let key = parts[1], signature = parts[2], time = parts[3], nonce = version == "1" ? parts[4] : ""
     if whitelist.enforced, !isOwner(Principal(key: key)), !whitelist.contains(key) { throw ChannelFailure("hub is not available") }
     guard (1...12).contains(time.count), time.allSatisfy(\.isASCII), time.allSatisfy(\.isNumber), let expiry = Int(time) else {
       throw ChannelFailure("invalid key")
     }
     if expiry + authClockSkew <= now { throw ChannelFailure("authorization expired") }
-    if expiry > now + authMaxLifetime + authClockSkew { throw ChannelFailure("authorization expires too late") }
-    let signed = version == "1" ? "hub1:\(hubKey):\(time)" : time
+    if expiry > now + (version == "1" ? authV1MaxLifetime : authMaxLifetime) + authClockSkew { throw ChannelFailure("authorization expires too late") }
+    // Before the signature: one HMAC turns away what isn't this hub's, or was used
+    if version == "1", !nonces.isValid(nonce, now: now) { throw ChannelFailure("invalid nonce") }
+    let signed = version == "1" ? "hub1:\(hubKey):\(nonce):\(time)" : time
     guard HubCrypto.publicKey(spki: key) != nil else { throw ChannelFailure("invalid key") }
     guard HubCrypto.verify(signature: signature, message: signed, spki: key) else { throw ChannelFailure("invalid signature") }
+    // Only a valid signature takes up room in the store of used nonces
+    if version == "1", !nonces.consume(nonce, now: now) { throw ChannelFailure("invalid nonce") }
     return key
   }
 
@@ -831,6 +838,8 @@ final class Security {
 
 /// Longest auth token lifetime the hub accepts, in seconds
 let authMaxLifetime = 300
+/// A v1 token's nonce lasts this long, and so does the token
+let authV1MaxLifetime = 60
 /// Tolerated clock difference between signer and hub, in seconds
 let authClockSkew = 30
 
