@@ -54,7 +54,8 @@ public final class IncomingCall {
   public let body: JSON?
   /// The request's `context`, `{}` when missing
   public let context: JSON
-  public unowned let peer: ChannelPeer
+  /// Nil once the connection is gone: answers to a call that outlived it are dropped
+  public private(set) weak var peer: ChannelPeer?
   public private(set) var isCancelled = false
   public private(set) var isFinished = false
   private var cancelActions: [() -> Void] = []
@@ -72,12 +73,12 @@ public final class IncomingCall {
     guard let id else { return }
     var object: JSONObject = ["id": .int(id)]
     if let body { object["body"] = body }
-    peer.write(.object(object))
+    peer?.write(.object(object))
   }
   public func fail(_ failure: ChannelFailure) {
     guard finish() else { return }
     guard let id else { return }
-    peer.write(failure.response(id: id))
+    peer?.write(failure.response(id: id))
   }
   public func finish(_ result: Result<JSON?, Error>) {
     switch result {
@@ -97,7 +98,7 @@ public final class IncomingCall {
     guard !isFinished else { return false }
     isFinished = true
     cancelActions = []
-    if let id, peer.incomingCalls[id] === self { peer.incomingCalls[id] = nil }
+    if let id, let peer, peer.incomingCalls[id] === self { peer.incomingCalls[id] = nil }
     return true
   }
   /// `{cancel}` from the caller: answers `cancelled`. A disconnect answers nothing.
@@ -116,7 +117,8 @@ public final class IncomingStream {
   public let id: Int
   public let body: JSON?
   public let context: JSON
-  public unowned let peer: ChannelPeer
+  /// Nil once the connection is gone: values of a stream that outlived it are dropped
+  public private(set) weak var peer: ChannelPeer?
   public private(set) var isFinished = false
   private var cancelActions: [() -> Void] = []
 
@@ -131,15 +133,15 @@ public final class IncomingStream {
     guard !isFinished else { return }
     var object: JSONObject = ["id": .int(id)]
     if let value { object["body"] = value }
-    peer.write(.object(object))
+    peer?.write(.object(object))
   }
   public func finish() {
     guard end() else { return }
-    peer.write(["id": .int(id), "done": true])
+    peer?.write(["id": .int(id), "done": true])
   }
   public func fail(_ failure: ChannelFailure) {
     guard end() else { return }
-    peer.write(failure.response(id: id))
+    peer?.write(failure.response(id: id))
   }
   /// Runs when the caller cancels or disconnects. Runs at once when that already happened.
   public func onCancel(_ action: @escaping () -> Void) {
@@ -154,7 +156,7 @@ public final class IncomingStream {
     guard !isFinished else { return false }
     isFinished = true
     cancelActions = []
-    if peer.incomingStreams[id] === self { peer.incomingStreams[id] = nil }
+    if let peer, peer.incomingStreams[id] === self { peer.incomingStreams[id] = nil }
     return true
   }
   func cancel() {
@@ -172,7 +174,8 @@ public final class IncomingSubscription {
   public let id: Int?
   public let body: JSON?
   public let context: JSON
-  public unowned let peer: ChannelPeer
+  /// Nil once the connection is gone
+  public private(set) weak var peer: ChannelPeer?
   private var isFinished = false
   init(path: String, id: Int?, body: JSON?, context: JSON, peer: ChannelPeer) {
     self.path = path
@@ -184,6 +187,7 @@ public final class IncomingSubscription {
   public func accept(topic: String?, body: JSON?) {
     guard !isFinished else { return }
     isFinished = true
+    guard let peer else { return }
     if let topic { peer.topics.insert(topic) }
     guard let id else { return }
     var object: JSONObject = ["id": .int(id)]
@@ -195,7 +199,7 @@ public final class IncomingSubscription {
     guard !isFinished else { return }
     isFinished = true
     guard let id else { return }
-    peer.write(failure.response(id: id))
+    peer?.write(failure.response(id: id))
   }
 }
 
@@ -220,6 +224,8 @@ public final class ChannelPeer {
 
   fileprivate(set) var incomingCalls: [Int: IncomingCall] = [:]
   fileprivate(set) var incomingStreams: [Int: IncomingStream] = [:]
+  /// Most calls and streams one connection may have open at once; more are refused with `too many requests`
+  public static let maxOpenRequests = 256
   private var nextId = 0
   private var responses: [Int: (JSONObject) -> Bool] = [:]
 
@@ -348,12 +354,14 @@ public final class ChannelPeer {
     let id = message["id"]?.int
     let context = message["context"].flatMap { $0.isNull ? nil : $0 } ?? .object([:])
     if let path = message["path"]?.string, !path.isEmpty {
+      if let id, let refusal = refusal(id) { return write(refusal.response(id: id)) }
       let call = IncomingCall(path: path, id: id, body: message["body"], context: context, peer: self)
       if let id { incomingCalls[id] = call }
       guard let handler else { return call.fail(.apiNotFound) }
       handler.peer(self, post: call)
     } else if let path = message["stream"]?.string, !path.isEmpty {
       guard let id else { return }
+      if let refusal = refusal(id) { return write(refusal.response(id: id)) }
       let stream = IncomingStream(path: path, id: id, body: message["body"], context: context, peer: self)
       incomingStreams[id] = stream
       guard let handler else { return stream.fail(.apiNotFound) }
@@ -375,6 +383,16 @@ public final class ChannelPeer {
       guard let response = responses[id] else { return }
       if response(message) { responses[id] = nil }
     }
+  }
+
+  /// Why a new call or stream with this id is refused: the id is open already (a second one would leave the first
+  /// answering a closed connection), or the connection has too many open
+  private func refusal(_ id: Int) -> ChannelFailure? {
+    if incomingCalls[id] != nil || incomingStreams[id] != nil { return ChannelFailure("id in use") }
+    if incomingCalls.count + incomingStreams.count >= Self.maxOpenRequests {
+      return ChannelFailure("too many requests")
+    }
+    return nil
   }
 
   private func closed() {

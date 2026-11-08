@@ -307,8 +307,10 @@ final class Hub: @unchecked Sendable {
     onChange()
   }
 
-  func connection(_ peer: ChannelPeer) -> HubConnection { peer.state as! HubConnection }
-  func caller(_ peer: ChannelPeer) -> Caller { security.caller(connection(peer).principal) }
+  /// The connection of a peer. A call or stream that outlived its peer gets an anonymous stand-in, whose answers go
+  /// nowhere.
+  func connection(_ peer: ChannelPeer?) -> HubConnection { (peer?.state as? HubConnection) ?? HubConnection(key: nil, ip: nil) }
+  func caller(_ peer: ChannelPeer?) -> Caller { security.caller(connection(peer).principal) }
 
   // MARK: Services
 
@@ -346,7 +348,7 @@ final class Hub: @unchecked Sendable {
 
   /// Picks a provider for a call to a service path, now or once one is free (hub-server 7461b70: waiting calls are
   /// served oldest first and fail with `api not available` after 30 s). Returns what stops waiting, when it waits.
-  private func provider(for path: String, peer: ChannelPeer, context: JSON,
+  private func provider(for path: String, peer: ChannelPeer?, context: JSON,
     _ use: @escaping (ServiceGroup, Result<Provider, ChannelFailure>) -> Void) throws -> (() -> Void)? {
     guard let group = services[path] else { throw ChannelFailure.apiNotFound }
     let caller = self.caller(peer)
@@ -620,13 +622,13 @@ final class Hub: @unchecked Sendable {
   private func reporter(of id: String) -> HubConnection? {
     reporterCandidates.first { $0.device == id }
   }
-  private func requireReporter(_ peer: ChannelPeer) throws -> String {
+  private func requireReporter(_ peer: ChannelPeer?) throws -> String {
     let connection = connection(peer)
     guard let id = connection.device, reporter(of: id) === connection else { throw ChannelFailure("not the device reporter") }
     return id
   }
 
-  private func describeDevice(_ peer: ChannelPeer, _ body: JSON?) throws {
+  private func describeDevice(_ peer: ChannelPeer?, _ body: JSON?) throws {
     let id = try requireReporter(peer)
     guard let body = body?.object else { throw ChannelFailure("invalid description") }
     func text(_ value: JSON?, _ max: Int) -> Bool {
@@ -661,7 +663,7 @@ final class Hub: @unchecked Sendable {
     }
   }
 
-  private func reportData(_ peer: ChannelPeer, _ body: JSON?) throws {
+  private func reportData(_ peer: ChannelPeer?, _ body: JSON?) throws {
     let id = try requireReporter(peer)
     guard let body, body.object != nil else { throw ChannelFailure("invalid data") }
     if body.text.utf8.count > 16384 { throw ChannelFailure("data too large") }
@@ -862,7 +864,7 @@ final class Hub: @unchecked Sendable {
   /// `hub/grant/check { path, caller }` → `{ allowed }`: whether `path` is granted to `caller` (a request's
   /// `context.hub.caller`, or `{ key?, device? }`). Owners always are; grants count unless the hub is locked down.
   /// Services ask about paths under the first segment of a path they registered, owners about any path.
-  private func checkGrant(_ peer: ChannelPeer, _ body: JSON?) throws -> JSON {
+  private func checkGrant(_ peer: ChannelPeer?, _ body: JSON?) throws -> JSON {
     guard let path = body?["path"]?.string, !path.isEmpty else { throw ChannelFailure("invalid path", code: "invalid_input") }
     let connection = connection(peer)
     if !caller(peer).owner {

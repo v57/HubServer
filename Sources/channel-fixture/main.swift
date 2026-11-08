@@ -18,7 +18,8 @@ let port = UInt16(arguments.first ?? ProcessInfo.processInfo.environment["CHANNE
 let router = ChannelRouter()
 var stats: [String: Int] = ["cancels": 0, "streamCancel": 0, "drops": 0, "rooms": 0, "once": 0]
 
-func state(_ peer: ChannelPeer) -> State { peer.state as! State }
+/// A call that outlived its connection gets a blank state
+func state(_ peer: ChannelPeer?) -> State { peer?.state as? State ?? State(headers: [:]) }
 func after(_ seconds: Double, _ action: @escaping () -> Void) {
   queue.asyncAfter(deadline: .now() + seconds, execute: action)
 }
@@ -41,7 +42,7 @@ func numbers(_ stream: IncomingStream, count: Int, counter: String? = nil) {
 
 /// Streams the client's own stream back to it
 func mirror(_ stream: IncomingStream, path: String) {
-  let peer = stream.peer
+  guard let peer = stream.peer else { return }
   let id = peer.stream(path) { event in
     switch event {
     case .value(let value): stream.send(value)
@@ -55,13 +56,13 @@ func mirror(_ stream: IncomingStream, path: String) {
 router
   .post("hello") { _ in "world" }
   .post("mirror", answering: { call in
-    call.peer.request("hello") { call.finish($0.mapError { $0 as Error }) }
+    call.peer?.request("hello") { call.finish($0.mapError { $0 as Error }) }
   })
   .post("echo") { $0.body }
   .post("empty") { _ in nil }
   .post("slow", answering: { call in after(0.05) { call.respond("slow") } })
   .post("disconnect") { call in
-    call.peer.close()
+    call.peer?.close()
     return nil
   }
   .post("auth") { call in
@@ -81,7 +82,7 @@ router
   .post("v2/never", answering: { call in call.onCancel { stats["cancels", default: 0] += 1 } })
   .post("v2/drop", answering: { call in
     stats["drops", default: 0] += 1
-    call.peer.close()
+    call.peer?.close()
   })
   .post("v2/drops") { _ in .int(stats["drops"] ?? 0) }
   .post("v2/drops/reset") { _ in
