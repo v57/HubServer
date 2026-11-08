@@ -28,6 +28,8 @@ final class HubConnection {
   var draining = false
   /// It authenticated with a v1 token
   var v1 = false
+  /// What its last `services` update said about its paths (protocol.md section 15)
+  var apiDescriptions: [String: PathDescriptions] = [:]
 
   init(key: String?, ip: String?) {
     self.id = newId()

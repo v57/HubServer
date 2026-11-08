@@ -65,6 +65,10 @@ public final class ChannelRouter: ChannelHandler {
   }
   /// Paths with a post or stream route
   public var routes: Set<String> { Set(posts.keys).union(streams.keys) }
+  /// Paths with a post route
+  public var postRoutes: Set<String> { Set(posts.keys) }
+  /// Paths with a stream route
+  public var streamRoutes: Set<String> { Set(streams.keys) }
 
   /// Sends the event to every peer subscribed to the topic. `nil` isn't sent.
   public func publish(_ topic: String, _ body: JSON?) {

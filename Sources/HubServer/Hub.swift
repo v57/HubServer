@@ -20,6 +20,8 @@ final class Hub: @unchecked Sendable {
   private var serviceOrder: [String] = []
   /// Built-in paths and the paths that have providers
   private var api = Set<String>()
+  /// Kinds of the hub's own paths, for `hub/api/list`
+  private var builtinKinds: [String: Set<ApiKind>] = [:]
   private let apps = Apps()
   private var requests = 0
   /// The device this hub runs on
@@ -94,6 +96,8 @@ final class Hub: @unchecked Sendable {
     security.settleLauncher { [unowned self] key in registry.isKeyRevoked(key) }
     registerRoutes()
     api = router.routes
+    for path in router.postRoutes { builtinKinds[path, default: []].insert(.post) }
+    for path in router.streamRoutes { builtinKinds[path, default: []].insert(.stream) }
   }
 
   // MARK: Lifecycle
@@ -492,6 +496,17 @@ final class Hub: @unchecked Sendable {
     })
   }
 
+  /// `hub/api/list`: the caller's paths with what their providers say about them (protocol.md section 15). Only
+  /// providers calls are routed to count, draining ones included, so a key waiting for approval describes nothing.
+  private func describedApi(_ caller: Caller) -> JSON {
+    let paths = allowedApi(caller).array?.compactMap(\.string) ?? []
+    return .array(paths.flatMap { path -> [JSON] in
+      let group = services[path]
+      let providers = group.map { ($0.providers + $0.draining).map { $0.connection.apiDescriptions[path] } } ?? []
+      return ApiDescriptions.describe(path, builtinKinds: builtinKinds[path] ?? [], providers: providers)
+    })
+  }
+
   // MARK: Devices
 
   private func deviceJSON(_ id: String) -> JSON? {
@@ -775,6 +790,10 @@ final class Hub: @unchecked Sendable {
         }
       })
       .post("hub/api") { [unowned self] call in allowedApi(caller(call.peer)) }
+      .post("hub/api/list") { [unowned self] call in describedApi(caller(call.peer)) }
+      .stream("hub/api/list") { [unowned self] call in
+        try stream(call, .api) { [unowned self] in describedApi(caller(call.peer)) }
+      }
       .stream("hub/api") { [unowned self] call in
         try stream(call, .api) { [unowned self] in allowedApi(caller(call.peer)) }
       }
@@ -834,6 +853,7 @@ final class Hub: @unchecked Sendable {
       reporterCandidates.append(connection)
     }
     if let headers = body?["services"]?.array {
+      connection.apiDescriptions = ApiDescriptions.read(headers)
       let paths = headers.compactMap { $0["path"]?.string }
       let wanted = Set(paths)
       addServices(connection, paths.filter { !connection.services.contains($0) })

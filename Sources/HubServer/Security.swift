@@ -14,7 +14,7 @@ enum BuiltinAccess {
 }
 
 private let publicBuiltins: Set<String> = [
-  "hub/info", "hub/service/update", "hub/api", "hub/status", "hub/status/badges",
+  "hub/info", "hub/service/update", "hub/api", "hub/api/list", "hub/status", "hub/status/badges",
   "hub/proxy/join", "hub/header",
 ]
 // `hub/net/bind` keeps the proof of its bind kind, `hub/net/node` tells agents where their node is, `hub/pair`
