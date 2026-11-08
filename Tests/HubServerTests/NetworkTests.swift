@@ -325,21 +325,25 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertEqual(again["profile"]?["overlayAddresses"]?.array?.count, 2)
   }
 
-  func testFreshJoinAdmission() throws {
-    // An inviter bound to this network signs an admission for a new joiner
-    let inviter = HubKeyPair()
-    let joiner = HubKeyPair()
+  /// An admission an inviter bound to this network signs for a new joiner
+  func freshAdmission(inviter: HubKeyPair, joiner: HubKeyPair) -> JSON {
     api.agents.registerProfile(AgentProfile(wireGuardKey: "wg-inviter", key: inviter.publicKey, overlayAddresses: [], connectedAt: isoNow()),
       connectionId: "inviter")
     let now = Date()
-    var admission: JSON = ["version": 1, "signatureDomain": "hub-network/direct-bootstrap-response/v1", "replayId": "r",
+    let admission: JSON = ["version": 1, "signatureDomain": "hub-network/direct-bootstrap-response/v1", "replayId": "r",
       "inviterServiceKey": .string(inviter.publicKey), "joinerServiceKey": .string(joiner.publicKey), "joinerWireGuardKey": "wg-joiner",
       "inviterWireGuardKey": "wg-inviter", "endpoints": [], "joinerAddress": ["ipv4": "100.127.255.254", "ipv6": "fd48:5542:4e45:ffff::fffe"],
       "inviterAddress": ["ipv4": "100.127.255.253", "ipv6": "fd48:5542:4e45:ffff::fffd"], "hubProHost": "100.127.255.253",
       "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(now.addingTimeInterval(120)))]
     var object = admission.object!
     object["signature"] = .string(NetworkSignature.sign(.directBootstrapResponse, admission, key: inviter))
-    admission = .object(object)
+    return .object(object)
+  }
+
+  func testFreshJoinAdmission() throws {
+    let inviter = owner()
+    let joiner = HubKeyPair()
+    let admission = freshAdmission(inviter: inviter, joiner: joiner)
     let first = try bind(bindRequest("wg-joiner", kind: "join", admission: admission), connection(joiner.publicKey))
     XCTAssertEqual(first["profile"]?["key"]?.string, joiner.publicKey)
     XCTAssertNil(first["profile"]?["admission"])
@@ -350,6 +354,22 @@ final class NetworkAPITests: XCTestCase {
     let member = api.listMembers().first { $0["key"]?.string == joiner.publicKey }!
     XCTAssertEqual(member["online"], false)
     XCTAssertEqual(member["wireGuardKey"], "wg-joiner")
+  }
+
+  /// Security audit M3: any member's admission approved the joining device
+  func testADeviceAMemberInvitedWaitsForAnOwner() throws {
+    let inviter = HubKeyPair()
+    let joiner = HubKeyPair()
+    let admission = freshAdmission(inviter: inviter, joiner: joiner)
+    var approved = 0
+    api.onBindApprove = { _ in approved += 1 }
+    let request = bindRequest("wg-joiner", kind: "join", admission: admission)
+    XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey, device: deviceA, attached: false)) }, "approval_required")
+    XCTAssertEqual(approved, 0)
+    XCTAssertFalse(api.listMembers().contains { $0["key"]?.string == joiner.publicKey })
+    XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey)) }, "forbidden")
+    let joined = try bind(request, connection(joiner.publicKey, device: deviceA))
+    XCTAssertEqual(joined["profile"]?["device"]?.string, deviceA)
   }
 
   func testAppleAgentBindNeedsAnOwnerAndReadiness() throws {

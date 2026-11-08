@@ -233,10 +233,12 @@ final class NetworkAPI {
     try checkProfile(request)
     let wireGuardKey = request["wireGuardKey"]!.string!
     var admitted = false
+    var inviter: AgentProfile?
     if let admission = request["admission"], let inviterKey = admission["inviterServiceKey"]?.string,
-      agents.profile(inviterKey) != nil, inviterKey != key
+      let profile = agents.profile(inviterKey), inviterKey != key
     {
       admitted = NetworkValidation.joinAdmission(admission, joinerKey: key, joinerWireGuardKey: wireGuardKey)
+      inviter = profile
     }
     // A fresh invitation lets a member rejoin with new tunnel keys; without one the bound WireGuard key stays
     if let existing = agents.profile(key), existing.wireGuardKey != wireGuardKey, !admitted {
@@ -244,6 +246,16 @@ final class NetworkAPI {
     }
     if !isMember(connection), !admitted {
       throw networkError("forbidden", "a valid invitation admission is required to join")
+    }
+    // Members may invite, but only an owner admits (security decisions 1.0, Hub 4): a device a member invited joins
+    // once an owner approved it, by its name and code, like any other device asking to join.
+    if !isMember(connection), let inviter, !security.isOwner(Principal(key: inviter.key, device: inviter.device)) {
+      guard connection.certificate?.deviceId != nil else {
+        throw networkError("forbidden", "a member's invitation admits only a device an owner approves")
+      }
+      guard connection.device != nil else {
+        throw networkError("approval_required", "an owner must approve this device before it joins")
+      }
     }
     return try registerProfile(request, connection: connection)
   }
