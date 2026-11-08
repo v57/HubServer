@@ -7,13 +7,15 @@ A Hub server in Swift, so any device can be the hub: the Hub app on iPhone, iPad
 
 ## Products
 
-| Product | What |
-|---|---|
-| `HubServer` | the hub, with the embedding API below |
-| `ChannelServer` | the server side of the [channel](../../Channel/channel) protocol: JSON, a WebSocket server on a byte-stream transport, the symmetric channel peer and a router |
-| `hub-server-swift` | the hub as a command, with hub-server's options |
+| Product | Purpose | Platforms | Import |
+|---|---|---|---|
+| [`HubServer`](docs/HubServer.md) | the hub, with the embedding API below | macOS 13, iOS 16, tvOS 16, visionOS 1, Mac Catalyst 16; Linux | `.product(name: "HubServer", package: "HubServer")`, `import HubServer` |
+| [`ChannelServer`](docs/ChannelServer.md) | the server side of the [channel](../../Channel/channel) protocol: JSON, a WebSocket server on a byte-stream transport, the symmetric channel peer and a router | same as `HubServer` (QUIC on Apple platforms only) | `.product(name: "ChannelServer", package: "HubServer")`, `import ChannelServer` (also re-exported by `HubServer`) |
+| [`hub-server-swift`](docs/HubServer.md#the-hub-server-swift-command) | the hub as a command, with hub-server's options | macOS, Linux | `swift run hub-server-swift` |
 
-Apple platforms (macOS 13, iOS 16, tvOS 16, visionOS 1, Mac Catalyst 16). No dependencies.
+Package: `.package(url: "https://github.com/v57/HubServer.git", branch: "main")`. No dependencies on Apple platforms;
+swift-crypto on Linux. `channel-fixture` is an internal test executable. Developer documentation:
+[docs/HubServer.md](docs/HubServer.md) and [docs/ChannelServer.md](docs/ChannelServer.md).
 
 ## Run it
 
@@ -69,9 +71,9 @@ await server.stop()                                      // closes connections, 
   advertises the hub); iOS suspends the listener when the app goes to the background, so a phone or tablet is a hub
   only while the app runs (or under a background mode that keeps it alive).
 - **Other platforms:** the transport sits behind `ChannelTransport` (message connections) and `ByteStreamListener`
-  (TCP). Apple platforms use Network.framework (`NetworkStreamListener`); Linux, Windows and Android ports
-  (`~/Developer/v57/SwiftUI`) add a `ByteStreamListener` on sockets, or their own `ChannelTransport`, and swift-crypto
-  in place of CryptoKit.
+  (TCP). Apple platforms use Network.framework (`NetworkStreamListener`), Linux POSIX sockets (`SocketStreamListener`)
+  and swift-crypto in place of CryptoKit. Windows and Android ports (`~/Developer/v57/SwiftUI`) still need a
+  `ByteStreamListener`, or their own `ChannelTransport`.
 - **QUIC:** ChannelServer's `QUICServer` (Apple platforms, macOS 12 / iOS 15 and later) serves Channel over QUIC
   (`Channel/channel/docs/quic.md`) next to a `WebSocketServer`, with a `SecIdentity` or a PKCS#12 file (kept in memory,
   so macOS 15 or later for that one). HubServer doesn't listen on it yet. Network.framework takes one connection per
