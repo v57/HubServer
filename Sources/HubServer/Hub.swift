@@ -125,8 +125,18 @@ final class Hub: @unchecked Sendable {
     registry.place(certificate, name: nil)
   }
 
-  /// At connect: checks the token, refuses revoked keys and keeps a valid certificate, attaching it if approved
+  /// At connect: checks the token, refuses revoked keys and keeps a valid certificate, attaching it if approved. A key
+  /// the hub knows that used v1 is refused v0 from then on.
   private func accept(_ request: UpgradeRequest) throws -> HubConnection {
+    let connection = try acceptToken(request)
+    if connection.key != nil, request.channelHeaders["v"] == "1" {
+      connection.v1 = true
+      security.usedV1(connection.principal)
+    }
+    return connection
+  }
+
+  private func acceptToken(_ request: UpgradeRequest) throws -> HubConnection {
     let headers = request.channelHeaders
     let key = try security.verifyToken(headers["auth"], version: headers["v"])
     let connection = HubConnection(key: key, ip: headers["x-hub-remote-ip"])
@@ -710,6 +720,7 @@ final class Hub: @unchecked Sendable {
             approveConnection(connection)
             security.members.add(deviceMember(id), to: ownersGroup)
           }
+          if connection.v1 { security.usedV1(connection.principal) }
           connectionsChanged()
           log("Paired owner \(key)\(connection.certificate.map { " on device \($0.deviceId)" } ?? "")")
           call.respond(["owner": true, "hubKey": .string(hubKey), "name": .string(name)])
@@ -914,7 +925,9 @@ final class Hub: @unchecked Sendable {
     router
       .stream("hub/security/mode") { [unowned self] call in
         try stream(call, .security) { [unowned self] in
-          ["mode": .string(security.effectiveMode.rawValue), "requireV1": .bool(security.requireV1)]
+          var mode: JSONObject = ["mode": .string(security.effectiveMode.rawValue), "requireV1": .bool(security.refusesV0())]
+          if let until = security.settings.v0Until?.string { mode["v0Until"] = .string(until) }
+          return .object(mode)
         }
       }
       .post("hub/security/mode/set") { [unowned self] call in

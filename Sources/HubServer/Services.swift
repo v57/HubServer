@@ -26,6 +26,8 @@ final class HubConnection {
   var isOpen = false
   /// Its paths take no new calls (`hub/service/update { draining: true }`); running calls go on
   var draining = false
+  /// It authenticated with a v1 token
+  var v1 = false
 
   init(key: String?, ip: String?) {
     self.id = newId()

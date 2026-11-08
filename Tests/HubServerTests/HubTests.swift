@@ -29,11 +29,11 @@ final class VectorTests: XCTestCase {
     let service = vectors["keys"]!["service"]!["publicKey"]!.string!
     try security.setMode(["requireV1": false])
     XCTAssertEqual(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 60), service)
-    // Expiry of a v0 token: 30 s of skew both ways, at most 300 s ahead
+    // Expiry of a v0 token: 30 s of skew both ways, at most 60 s ahead as for v1 (the Hub 1.0 app signs a minute)
     XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry + 29))
     XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry + 30))
-    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 330))
-    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 331))
+    XCTAssertNoThrow(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 90))
+    XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 91))
     try security.setMode(["requireV1": true])
     XCTAssertThrowsError(try security.verifyToken(vectors["auth"]!["v0"]!["header"]!.string, version: "0", now: expiry - 60)) { error in
       XCTAssertEqual((error as? ChannelFailure)?.message, "unsupported version")
@@ -105,15 +105,85 @@ final class VectorTests: XCTestCase {
     XCTAssertEqual(later.usedCount, 1)
   }
 
-  func testStoredRequireV1FalseFromBeforeAuthV2CountsAsUnset() throws {
+  /// A data directory with these files, and a security loaded from it
+  private func securityWith(_ files: [String: String], hubKey: String = HubKeyPair().publicKey) throws -> (Security, Storage) {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory.appendingPathComponent("data"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let storage = Storage(directory: directory, queue: DispatchQueue(label: "test"), log: { _ in })
     storages.append(storage)
-    try Data(#"{"security":{"mode":"default-allow","requireV1":false}}"#.utf8).write(to: storage.store("hub.json").url)
-    let security = Security(storage: storage, hubKey: HubKeyPair().publicKey)
+    for (name, text) in files { try Data(text.utf8).write(to: storage.store(name).url) }
+    let security = Security(storage: storage, hubKey: hubKey)
     security.load(hubKeyExisted: true)
-    XCTAssertTrue(security.requireV1)
+    return (security, storage)
+  }
+
+  /// The Hub 1.0 App Store app speaks only v0: a stored requireV1 alone, from before auth v2 or since, refuses nothing
+  func testAStoredRequireV1AloneKeepsV0() throws {
+    for stored in [#"{"security":{"mode":"default-allow","requireV1":false}}"#, #"{"security":{"mode":"default-deny","requireV1":true}}"#] {
+      let (security, _) = try securityWith(["hub.json": stored])
+      XCTAssertFalse(security.requireV1)
+      XCTAssertFalse(security.refusesV0())
+    }
+    let (refused, _) = try securityWith(["hub.json": #"{"security":{"mode":"default-deny","requireV1":true,"refuseV0":true}}"#])
+    XCTAssertTrue(refused.refusesV0())
+    let (fresh, _) = try securityWith([:])
+    XCTAssertFalse(fresh.refusesV0())
+    XCTAssertEqual(fresh.settings.data["security"], ["mode": "default-allow", "requireV1": false, "allowV0": true])
+  }
+
+  /// The v0 transition: a key the hub knows that used v1 is refused v0 for good, also after a restart
+  func testAKnownKeyThatUsedV1IsRefusedV0ForGood() throws {
+    let hub = HubKeyPair(), owner = HubKeyPair(), granted = HubKeyPair(), stranger = HubKeyPair()
+    let (security, storage) = try securityWith([:], hubKey: hub.publicKey)
+    let now = Int(Date().timeIntervalSince1970)
+    func v0(_ key: HubKeyPair, expiry: Int? = nil) -> String {
+      let expiry = expiry ?? now + 60
+      return "key.\(key.publicKey).\(key.sign("\(expiry)")).\(expiry)"
+    }
+    security.addOwner(owner.publicKey)
+    security.allowCalls(granted.publicKey, ["ratchet/read"], by: "test")
+    for key in [owner, granted, stranger] { XCTAssertEqual(try security.verifyToken(v0(key), version: nil, now: now), key.publicKey) }
+    // A five-minute v0 token is too long
+    XCTAssertThrowsError(try security.verifyToken(v0(stranger, expiry: now + 300), version: nil, now: now))
+    for key in [owner, granted, stranger] { security.usedV1(Principal(key: key.publicKey)) }
+    for key in [owner, granted] {
+      XCTAssertThrowsError(try security.verifyToken(v0(key), version: nil, now: now)) { error in
+        XCTAssertEqual((error as? ChannelFailure)?.message, "unsupported version")
+      }
+      XCTAssertThrowsError(try security.verifyToken(v0(key), version: "0", now: now))
+    }
+    // A key the hub doesn't know isn't kept
+    XCTAssertEqual(try security.verifyToken(v0(stranger), version: nil, now: now), stranger.publicKey)
+    XCTAssertEqual(security.v1Keys.ids, [owner, granted].map { HubCrypto.deviceId(spki: $0.publicKey) })
+    storage.flush()
+    let file = try String(contentsOf: storage.store("v1-keys.json").url, encoding: .utf8)
+    let (restarted, _) = try securityWith(["v1-keys.json": file], hubKey: hub.publicKey)
+    XCTAssertThrowsError(try restarted.verifyToken(v0(owner), version: nil, now: now))
+    XCTAssertNoThrow(try restarted.verifyToken(v0(stranger), version: nil, now: now))
+    // A corrupt file refuses v0 from every key
+    let (corrupt, _) = try securityWith(["v1-keys.json": "{"], hubKey: hub.publicKey)
+    XCTAssertThrowsError(try corrupt.verifyToken(v0(stranger), version: nil, now: now))
+  }
+
+  func testTheTransitionEndRefusesV0FromEveryKeyAndAnOwnerCanTakeItBack() throws {
+    let passed = isoDate(Date().addingTimeInterval(-1)), coming = isoDate(Date().addingTimeInterval(3600))
+    let (before, _) = try securityWith(["hub.json": #"{"security":{"mode":"default-deny","v0Until":"\#(coming)"}}"#])
+    XCTAssertFalse(before.refusesV0())
+    XCTAssertTrue(before.refusesV0(now: Date().addingTimeInterval(7200)))
+    let (after, _) = try securityWith(["hub.json": #"{"security":{"mode":"default-deny","v0Until":"\#(passed)"}}"#])
+    XCTAssertTrue(after.refusesV0())
+    XCTAssertFalse(after.requireV1)
+    try after.setMode(["requireV1": false])
+    XCTAssertEqual(after.settings.v0Until, .null)
+    XCTAssertFalse(after.refusesV0())
+    // Kept as stored, an invalid one dropped, as hub-server does
+    let cases: [(String, JSON?)] = [(#""2027-03-01T00:00:00.000Z""#, JSON.string("2027-03-01T00:00:00.000Z")),
+                           (#""2027-03-01T03:00:00+03:00""#, JSON.string("2027-03-01T03:00:00+03:00")),
+                           ("null", JSON.null), (#""soon""#, nil), (#""2027-03-01""#, nil), ("5", nil)]
+    for (stored, kept) in cases {
+      let (security, _) = try securityWith(["hub.json": #"{"security":{"mode":"default-allow","v0Until":\#(stored)}}"#])
+      XCTAssertEqual(security.settings.v0Until, kept, stored)
+    }
   }
 
   func testCertificates() throws {

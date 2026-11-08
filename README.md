@@ -82,8 +82,9 @@ await server.stop()                                      // closes connections, 
 
 protocol.md sections 1–12:
 
-- `hub/info`, v0 and v1 tokens (v1 bound to the hub key, 30 s skew, 300 s maximum lifetime), `requireV1`,
-  the whitelist (lockdown mode)
+- `hub/info`, v0 and v1 tokens (v1 bound to the hub key, 30 s skew, 60 s maximum lifetime for both), the v0
+  transition (v0 until `v0Until`, never from a key on `v1-keys.json` or once an owner set `requireV1`), the whitelist
+  (lockdown mode)
 - caller identity in `context.hub` of every forwarded request (client-supplied `hub` replaced)
 - service registration (`hub/service/update` with `services`, `add/remove`, `apps`, `public`, `limit`,
   `permissions`, `reporter`), hosting approval (`hub/host/*`), routing of posts and streams with cancel,

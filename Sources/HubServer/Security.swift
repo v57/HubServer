@@ -628,11 +628,30 @@ final class Whitelist {
   }
 }
 
+/// When the hub stops taking v0 tokens (ISO 8601), written into every store that has no end yet. Unset for now: the
+/// release sets it to 90 days after the new Hub app is live. Until then the Hub 1.0 App Store app (v0 only) connects,
+/// except with a key that has used v1 here or on a hub whose owner refused v0. Same as hub-server's `v0TransitionEnd`.
+let v0TransitionEnd: String? = nil
+
+/// A stored transition end: an ISO 8601 date and time with a zone, as hub-server takes it
+func parseV0Until(_ text: String) -> Date? {
+  guard text.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression) != nil
+  else { return nil }
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = text.contains(".") ? [.withInternetDateTime, .withFractionalSeconds] : [.withInternetDateTime]
+  return formatter.date(from: text)
+}
+
 /// `hub.json`: security mode and hub settings. Unknown fields are kept.
 final class HubSettings {
   private(set) var data = JSONObject()
   private(set) var mode: SecurityMode = .defaultDeny
-  private(set) var requireV1 = true
+  /// An owner refused v0 tokens (`refuseV0`). A stored `requireV1` alone means nothing: every hub since auth v2 wrote
+  /// one, so the Hub 1.0 App Store app (v0 only) keeps reaching hubs that updated.
+  private(set) var requireV1 = false
+  /// The end of the v0 transition: a time (`.string`), `.null` when an owner took v0 back after it ended, nil when none
+  /// is stored
+  private(set) var v0Until: JSON?
   let store: JSONStore
 
   init(storage: Storage) {
@@ -649,8 +668,12 @@ final class HubSettings {
       data = object
       storedMode = json["security"]?["mode"]?.string != nil
       mode = json["security"]?["mode"]?.string == SecurityMode.defaultDeny.rawValue ? .defaultDeny : .defaultAllow
-      // Stores from before auth v2 hold `requireV1: false` that nobody chose; an owner turning it off writes allowV0
-      requireV1 = json["security"]?["allowV0"] != .bool(true)
+      requireV1 = json["security"]?["refuseV0"] == .bool(true)
+      switch json["security"]?["v0Until"] {
+      case .some(.null): v0Until = .null
+      case .some(.string(let text)) where parseV0Until(text) != nil: v0Until = .string(text)
+      default: v0Until = nil
+      }
     }
     if store.corrupt {
       data = [:]
@@ -663,18 +686,32 @@ final class HubSettings {
     if data["api"] == nil { data["api"] = [:] }
     if data["pendingLimit"] == nil { data["pendingLimit"] = 0 }
     if data["mergeKeys"] == nil { data["mergeKeys"] = [:] }
+    let settingEnd = v0Until == nil && v0TransitionEnd != nil
+    if settingEnd { v0Until = v0TransitionEnd.map(JSON.string) }
     writeSecurity()
-    if !existed || store.corrupt || !storedMode { store.writeNow() }
+    if !existed || store.corrupt || !storedMode || settingEnd { store.writeNow() }
   }
   private func writeSecurity() {
     var security: JSONObject = ["mode": .string(mode.rawValue), "requireV1": .bool(requireV1)]
-    if !requireV1 { security["allowV0"] = true }
+    if requireV1 { security["refuseV0"] = true } else { security["allowV0"] = true }
+    if let v0Until { security["v0Until"] = v0Until }
     data["security"] = .object(security)
   }
+  /// The transition end, nil while there is none
+  var v0UntilDate: Date? { v0Until?.string.flatMap(parseV0Until) }
+  /// Whether v0 tokens are refused from everyone: an owner refused them, or the transition ended
+  func refusesV0(now: Date = Date()) -> Bool {
+    requireV1 || v0UntilDate.map { now >= $0 } ?? false
+  }
   func setSecurity(mode: SecurityMode?, requireV1: Bool?) {
-    let changed = (mode != nil && mode != self.mode) || (requireV1 != nil && requireV1 != self.requireV1)
+    var changed = (mode != nil && mode != self.mode) || (requireV1 != nil && requireV1 != self.requireV1)
     if let mode { self.mode = mode }
     if let requireV1 { self.requireV1 = requireV1 }
+    // Taking v0 back after the transition ended keeps it, until an owner refuses it again
+    if requireV1 == false, let end = v0UntilDate, Date() >= end {
+      v0Until = .null
+      changed = true
+    }
     writeSecurity()
     if changed { store.save() }
   }
@@ -696,6 +733,34 @@ final class HubSettings {
   }
 }
 
+/// `v1-keys.json`: the keys that authenticated with v1 and that the hub knows, as the first 32 hex characters of the
+/// SHA-256 of their SPKI (a device id for a device key). A key on the list is refused v0 for good. While the file is
+/// corrupt every key is.
+final class V1Keys {
+  private(set) var ids: [String] = []
+  private var set = Set<String>()
+  let store: JSONStore
+
+  init(storage: Storage) {
+    store = storage.store("v1-keys.json")
+    store.encode = { [unowned self] in ["schema": 1, "keys": JSON(ids)] }
+  }
+  func load() {
+    store.load { data in
+      guard data["schema"]?.int == 1, let keys = data["keys"]?.array else { throw ChannelFailure("unsupported v1 keys file") }
+      ids = keys.compactMap(\.string)
+      set = Set(ids)
+    }
+  }
+  func contains(_ key: String) -> Bool { store.corrupt || set.contains(HubCrypto.deviceId(spki: key)) }
+  func add(_ key: String) {
+    let id = HubCrypto.deviceId(spki: key)
+    guard set.insert(id).inserted else { return }
+    ids.append(id)
+    store.save()
+  }
+}
+
 // MARK: - Security
 
 final class Security {
@@ -705,6 +770,8 @@ final class Security {
   let names: PathNames
   let host: HostApprovals
   let whitelist: Whitelist
+  /// Keys that authenticated with v1 here: v0 tokens are refused from them for good
+  let v1Keys: V1Keys
   /// The challenges v1 tokens sign
   let nonces = TokenNonces()
   let settings: HubSettings
@@ -728,6 +795,7 @@ final class Security {
     names = PathNames(storage: storage)
     host = HostApprovals(storage: storage)
     whitelist = Whitelist(storage: storage)
+    v1Keys = V1Keys(storage: storage)
     settings = HubSettings(storage: storage)
   }
 
@@ -739,6 +807,7 @@ final class Security {
     names.load()
     host.load()
     whitelist.load()
+    v1Keys.load()
     // An empty path list or whitelist opens the hub and an empty owners group keeps owners out, so a corrupt one
     // locks the hub down instead
     if [settings.store, names.store, whitelist.store, members.store, grants.store].contains(where: \.corrupt) { lockDown() }
@@ -748,6 +817,21 @@ final class Security {
   var local = false
   var mode: SecurityMode { local ? .defaultAllow : settings.mode }
   var requireV1: Bool { settings.requireV1 }
+  /// Whether v0 tokens are refused from every key: an owner refused them, or the transition ended
+  func refusesV0(now: Date = Date()) -> Bool { settings.refusesV0(now: now) }
+  /// A connection authenticated with v1. Its key is refused v0 from now on when the hub knows it: a member of a group,
+  /// an approved device, or a key that holds grants, hosting approvals, a whitelist entry or the launcher's paths. Keys
+  /// the hub doesn't know hold nothing a replayed token could reach, and recording them would let anyone fill the store.
+  func usedV1(_ principal: Principal) {
+    guard let key = principal.key, !v1Keys.contains(key) else { return }
+    let known = principal.device != nil
+      || !groups(principal).isEmpty
+      || grants.grants.contains { $0.subject == .key(key) }
+      || !host.allowed.values(key).isEmpty
+      || whitelist.users.contains(key)
+      || launcher == key
+    if known { v1Keys.add(key) }
+  }
   /// `default-deny` while locked down
   var effectiveMode: SecurityMode { lockdown ? .defaultDeny : mode }
   /// The launcher's `launcher/*`: a grant to the key named by `HUBLAUNCHER`, never owner rights. A key named before
@@ -862,7 +946,7 @@ final class Security {
     guard version == "0" || version == "1" else { throw ChannelFailure("unsupported version") }
     // An anonymous connection on a whitelisted hub may only ask `hub/info`: that's how a known client gets its challenge
     guard let token, !token.isEmpty else { return nil }
-    if version == "0", requireV1 { throw ChannelFailure("unsupported version") }
+    if version == "0", refusesV0(now: Date(timeIntervalSince1970: TimeInterval(now))) { throw ChannelFailure("unsupported version") }
     let parts = token.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
     guard parts.count == (version == "1" ? 5 : 4), parts[0] == "key" else { throw ChannelFailure("invalid key") }
     let key = parts[1], signature = parts[2], time = parts[3], nonce = version == "1" ? parts[4] : ""
@@ -871,7 +955,8 @@ final class Security {
       throw ChannelFailure("invalid key")
     }
     if expiry + authClockSkew <= now { throw ChannelFailure("authorization expired") }
-    if expiry > now + (version == "1" ? authV1MaxLifetime : authMaxLifetime) + authClockSkew { throw ChannelFailure("authorization expires too late") }
+    // v0 tokens live as long as v1 ones: a minute, as the Hub 1.0 app signs them
+    if expiry > now + authV1MaxLifetime + authClockSkew { throw ChannelFailure("authorization expires too late") }
     // Before the signature: one HMAC turns away what isn't this hub's, or was used
     if version == "1", !nonces.isValid(nonce, now: now) { throw ChannelFailure("invalid nonce") }
     let signed = version == "1" ? "hub1:\(hubKey):\(nonce):\(time)" : time
@@ -879,6 +964,8 @@ final class Security {
     guard HubCrypto.verify(signature: signature, message: signed, spki: key) else { throw ChannelFailure("invalid signature") }
     // Only a valid signature takes up room in the store of used nonces
     if version == "1", !nonces.consume(nonce, now: now) { throw ChannelFailure("invalid nonce") }
+    // After the signature, so it tells nobody else which keys use v1
+    if version == "0", v1Keys.contains(key) { throw ChannelFailure("unsupported version") }
     return key
   }
 
@@ -956,9 +1043,7 @@ final class Security {
   }
 }
 
-/// Longest auth token lifetime the hub accepts, in seconds
-let authMaxLifetime = 300
-/// A v1 token's nonce lasts this long, and so does the token
+/// A v1 token's nonce lasts this long, and so does the token (v0 tokens too, since the v0 transition)
 let authV1MaxLifetime = 60
 /// Tolerated clock difference between signer and hub, in seconds
 let authClockSkew = 30
