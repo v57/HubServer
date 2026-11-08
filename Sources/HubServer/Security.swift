@@ -757,7 +757,8 @@ final class V1Keys {
     let id = HubCrypto.deviceId(spki: key)
     guard set.insert(id).inserted else { return }
     ids.append(id)
-    store.save()
+    // At once, not after the save delay: a restart in between would take v0 from the key again
+    store.writeNow()
   }
 }
 

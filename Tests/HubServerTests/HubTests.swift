@@ -155,7 +155,8 @@ final class VectorTests: XCTestCase {
     // A key the hub doesn't know isn't kept
     XCTAssertEqual(try security.verifyToken(v0(stranger), version: nil, now: now), stranger.publicKey)
     XCTAssertEqual(security.v1Keys.ids, [owner, granted].map { HubCrypto.deviceId(spki: $0.publicKey) })
-    storage.flush()
+    // Written at once, without a flush: a restart right after the first v1 auth still refuses v0
+    storage.waitForWrites()
     let file = try String(contentsOf: storage.store("v1-keys.json").url, encoding: .utf8)
     let (restarted, _) = try securityWith(["v1-keys.json": file], hubKey: hub.publicKey)
     XCTAssertThrowsError(try restarted.verifyToken(v0(owner), version: nil, now: now))
