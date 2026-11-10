@@ -124,12 +124,13 @@ signatures (checked against hub-server's vectors and a Go-signed admission):
 The `machine` agent proves itself over `/var/run/hub-net/agent.sock` (macOS) or `/run/hub-net/agent.sock` (Linux);
 `localAgentEndpoint` (`--net-agent`, `HUB_NET_AGENT_SOCKET`) picks another socket or `tcp://host:port`, for an agent
 that runs next to the hub in a container. On iOS there is no machine agent: the app's packet tunnel binds as
-`apple-app`.
+`apple-app`. The Apple local network agent APIs (`hub/net/apple-agent/bind`, `renew`, `unbind`) are served: an
+authenticated device's readiness assertion, checked against its registered profile, WireGuard key and Hub, binds it as
+this host's local agent until the assertion expires.
 
 ## Not implemented
 
 - Merging and proxies (`hub/merge/add|remove`, `hub/proxy*`, `--merge`, `--proxy`). `hub/merge/status` streams `[]`.
-- The Apple local network agent APIs.
 - Migration of the pre-grants stores (`clients.json`, path lists in `groups.json`, `group_users.json`): a data
   directory from an old hub-pro should go through hub-server once first.
 
