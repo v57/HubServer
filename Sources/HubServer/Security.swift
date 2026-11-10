@@ -39,7 +39,7 @@ func builtinAccess(_ path: String) -> BuiltinAccess? {
 /// Names of the owner APIs that `hub/group/names` lists, as hub-server has them
 private let hubApiNames: [(String, String)] = [
   ("hub/merge/add", "Hub: Merge Hubs"), ("hub/merge/remove", "Hub: Merge Hubs"), ("hub/key", "Hub: Merge Hubs"),
-  ("hub/proxy/add", "Hub: Add Proxy Hubs"), ("hub/proxy/remove", "Hub: Add Proxy Hubs"),
+  ("hub/proxy/add", "Hub: Manage Proxy Hubs"), ("hub/proxy/remove", "Hub: Manage Proxy Hubs"),
   ("hub/balancer/set", "Hub: Manage Load Balancer"), ("hub/balancer/limit", "Hub: Manage Load Balancer"),
   ("hub/whitelist", "Hub: Whitelist mode"), ("hub/host/update", "Hub: Manage Permissions"),
   ("hub/host/pending", "Hub: Manage Permissions"), ("hub/host/allowed", "Hub: Manage Permissions"),
