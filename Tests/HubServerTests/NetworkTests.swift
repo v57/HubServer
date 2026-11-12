@@ -326,12 +326,12 @@ final class NetworkAPITests: XCTestCase {
   }
 
   /// An admission an inviter bound to this network signs for a new joiner
-  func freshAdmission(inviter: HubKeyPair, joiner: HubKeyPair) -> JSON {
+  func freshAdmission(inviter: HubKeyPair, joiner: HubKeyPair, replayId: String = "r", wireGuardKey: String = "wg-joiner") -> JSON {
     api.agents.registerProfile(AgentProfile(wireGuardKey: "wg-inviter", key: inviter.publicKey, overlayAddresses: [], connectedAt: isoNow()),
       connectionId: "inviter")
     let now = Date()
-    let admission: JSON = ["version": 1, "signatureDomain": "hub-network/direct-bootstrap-response/v1", "replayId": "r",
-      "inviterServiceKey": .string(inviter.publicKey), "joinerServiceKey": .string(joiner.publicKey), "joinerWireGuardKey": "wg-joiner",
+    let admission: JSON = ["version": 1, "signatureDomain": "hub-network/direct-bootstrap-response/v1", "replayId": .string(replayId),
+      "inviterServiceKey": .string(inviter.publicKey), "joinerServiceKey": .string(joiner.publicKey), "joinerWireGuardKey": .string(wireGuardKey),
       "inviterWireGuardKey": "wg-inviter", "endpoints": [], "joinerAddress": ["ipv4": "100.127.255.254", "ipv6": "fd48:5542:4e45:ffff::fffe"],
       "inviterAddress": ["ipv4": "100.127.255.253", "ipv6": "fd48:5542:4e45:ffff::fffd"], "hubProHost": "100.127.255.253",
       "issuedAt": .string(isoDate(now)), "expiresAt": .string(isoDate(now.addingTimeInterval(120)))]
@@ -370,6 +370,81 @@ final class NetworkAPITests: XCTestCase {
     XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey)) }, "forbidden")
     let joined = try bind(request, connection(joiner.publicKey, device: deviceA))
     XCTAssertEqual(joined["profile"]?["device"]?.string, deviceA)
+  }
+
+  /// Hub app H-034: a member's Add a Device asks the hub machine's agent, an owner's, to make the invitation. The
+  /// agent holds it for the member, so the joiner waits for an owner all the same; the owner's own invitations don't.
+  func testAnInvitationTheHubsAgentMadeForAMemberWaitsForAnOwner() throws {
+    let machine = owner()
+    let held = String(repeating: "h", count: 43), plain = String(repeating: "p", count: 43)
+    let expiresAt = JSON.string(isoDate(Date().addingTimeInterval(7 * 24 * 3600)))
+    let by: JSON = ["key": "member-key", "device": .string(deviceB), "name": "iPhone"]
+    api.agents.registerProfile(AgentProfile(wireGuardKey: "wg-machine", key: machine.publicKey, overlayAddresses: [], connectedAt: isoNow()),
+      connectionId: "machine")
+    XCTAssertEqual(try api.holdInvitation(["replayId": .string(held), "expiresAt": expiresAt, "by": by], connection: connection(machine.publicKey))["success"], true)
+    var approved = 0
+    api.onBindApprove = { _ in approved += 1 }
+
+    let joiner = HubKeyPair()
+    let request = bindRequest("wg-joiner", kind: "join", admission: freshAdmission(inviter: machine, joiner: joiner, replayId: held))
+    XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey, device: deviceA, attached: false)) }, "approval_required")
+    XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey)) }, "forbidden")
+    XCTAssertEqual(approved, 0)
+    api.isDenied = { $0 == self.deviceA }
+    XCTAssertEqual(code { try self.bind(request, connection(joiner.publicKey, device: deviceA, attached: false)) }, "denied")
+    // Once an owner approved the device, it joins
+    let joined = try bind(request, connection(joiner.publicKey, device: deviceA))
+    XCTAssertEqual(joined["profile"]?["device"]?.string, deviceA)
+
+    // The owner's own invitation still admits at once
+    let other = HubKeyPair()
+    let own = bindRequest("wg-other", kind: "join", admission: freshAdmission(inviter: machine, joiner: other, replayId: plain, wireGuardKey: "wg-other"))
+    XCTAssertEqual(try bind(own, connection(other.publicKey, device: deviceB, attached: false))["profile"]?["key"]?.string, other.publicKey)
+    XCTAssertEqual(approved, 1)
+
+    // Held invitations outlive a restart
+    storage.flush()
+    let reopened = Storage(directory: storage.directory, queue: .main, log: { _ in })
+    let again = NetworkAPI(storage: reopened, security: security, key: HubKeyPair(), queue: .main)
+    again.load()
+    defer { withExtendedLifetime(reopened) {} }
+    XCTAssertEqual(again.registry.heldInvitation(held)?["device"]?.string, deviceB)
+    XCTAssertNil(again.registry.heldInvitation(plain))
+  }
+
+  func testHoldingAnInvitationNeedsAnOwnerOrAnAgentAndAValidOne() throws {
+    let stranger = HubKeyPair(), agent = HubKeyPair()
+    let replayId = String(repeating: "a", count: 43)
+    let week = JSON.string(isoDate(Date().addingTimeInterval(7 * 24 * 3600)))
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": .string(replayId), "expiresAt": week], connection: connection(stranger.publicKey)) }, "forbidden")
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": .string(replayId), "expiresAt": week], connection: connection(nil)) }, "forbidden")
+    api.agents.registerProfile(AgentProfile(wireGuardKey: "wg-agent", key: agent.publicKey, overlayAddresses: [], connectedAt: isoNow()),
+      connectionId: "agent")
+    let holder = connection(agent.publicKey)
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": "short", "expiresAt": week], connection: holder) }, "invalid_request")
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": .string(String(repeating: "/", count: 43)), "expiresAt": week], connection: holder) }, "invalid_request")
+    let past = JSON.string(isoDate(Date().addingTimeInterval(-60)))
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": .string(replayId), "expiresAt": past], connection: holder) }, "invalid_request")
+    let tooLong = JSON.string(isoDate(Date().addingTimeInterval(9 * 24 * 3600)))
+    XCTAssertEqual(code { try self.api.holdInvitation(["replayId": .string(replayId), "expiresAt": tooLong], connection: holder) }, "invalid_request")
+    XCTAssertNil(code { try self.api.holdInvitation(["replayId": .string(replayId), "expiresAt": week], connection: holder) })
+    XCTAssertNotNil(api.registry.heldInvitation(replayId))
+    XCTAssertNil(api.registry.heldInvitation(replayId, now: Date().addingTimeInterval(8 * 24 * 3600)), "an expired hold is gone")
+  }
+
+  func testAFullListOfHeldInvitationsRefusesTheNextAndDropsOnlyExpiredOnes() throws {
+    let registry = api.registry
+    let now = Date()
+    for index in 0..<NetworkRegistry.maxHeldInvitations {
+      try registry.holdInvitation("held-\(index)", by: [:], expiresAt: now.addingTimeInterval(index == 0 ? 60 : 3600), now: now)
+    }
+    XCTAssertThrowsError(try registry.holdInvitation("one-more", by: [:], expiresAt: now.addingTimeInterval(3600), now: now))
+    XCTAssertNotNil(registry.heldInvitation("held-0", now: now), "a full list drops none that still hold")
+    // Once one expired, there's room
+    let later = now.addingTimeInterval(120)
+    XCTAssertNoThrow(try registry.holdInvitation("one-more", by: [:], expiresAt: later.addingTimeInterval(3600), now: later))
+    XCTAssertNil(registry.heldInvitation("held-0", now: later))
+    XCTAssertNotNil(registry.heldInvitation("held-1", now: later))
   }
 
   func testAppleAgentBindNeedsAnOwnerAndReadiness() throws {

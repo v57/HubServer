@@ -21,6 +21,8 @@ final class NetworkAPI {
   var onRevokedDevicesChanged: () -> Void = {}
   /// A pending device whose agent passed its bind proof is approved (protocol.md section 10)
   var onBindApprove: (HubConnection) -> Void = { _ in }
+  /// Whether an owner denied the device of this id (`hub/device/deny`)
+  var isDenied: (String) -> Bool = { _ in false }
   /// Device names for member DNS names
   var deviceLabel: (String) -> String? = { _ in nil }
   /// The device a service key runs on, set by the hub
@@ -248,16 +250,45 @@ final class NetworkAPI {
       throw networkError("forbidden", "a valid invitation admission is required to join")
     }
     // Members may invite, but only an owner admits (security decisions 1.0, Hub 4): a device a member invited joins
-    // once an owner approved it, by its name and code, like any other device asking to join.
-    if !isMember(connection), let inviter, !security.isOwner(Principal(key: inviter.key, device: inviter.device)) {
-      guard connection.certificate?.deviceId != nil else {
+    // once an owner approved it, by its name and code, like any other device asking to join. That's a member's own
+    // agent signing, or the hub machine's agent signing an invitation a member asked it for (held by its replay id).
+    if !isMember(connection), let inviter, !security.isOwner(Principal(key: inviter.key, device: inviter.device))
+      || registry.heldInvitation(request["admission"]?["replayId"]?.string) != nil
+    {
+      guard let deviceId = connection.certificate?.deviceId else {
         throw networkError("forbidden", "a member's invitation admits only a device an owner approves")
       }
       guard connection.device != nil else {
+        if isDenied(deviceId) { throw networkError("denied", "an owner denied this device") }
         throw networkError("approval_required", "an owner must approve this device before it joins")
       }
     }
     return try registerProfile(request, connection: connection)
+  }
+
+  /// `hub/net/invitations/hold`: the hub machine's agent made an invitation a member asked for, so whoever joins with
+  /// it waits for an owner. Owners and bound agents only; holding asks for more approval, never less.
+  func holdInvitation(_ request: JSON?, connection: HubConnection) throws -> JSON {
+    guard isOwner(connection) || connection.key.flatMap(agents.profile) != nil else {
+      throw networkError("forbidden", "only an owner or a network agent holds invitations")
+    }
+    guard let replayId = request?["replayId"]?.string, replayId.count == 43,
+      replayId.allSatisfy({ $0.isLetter && $0.isASCII || $0.isNumber && $0.isASCII || $0 == "-" || $0 == "_" })
+    else { throw networkError("invalid_request", "invalid replayId") }
+    let now = Date()
+    guard let expiresAt = NetworkTime.parse(request?["expiresAt"]?.string), expiresAt > now,
+      expiresAt.timeIntervalSince(now) <= NetworkTime.invitationLifetime
+    else { throw networkError("invalid_request", "invalid expiresAt") }
+    var by = JSONObject()
+    for field in ["key", "device", "name"] {
+      if let value = request?["by"]?[field]?.string, value.utf8.count <= 512 { by[field] = .string(value) }
+    }
+    do {
+      try registry.holdInvitation(replayId, by: .object(by), expiresAt: expiresAt, now: now)
+    } catch {
+      throw networkError("unavailable", ChannelFailure(error).message)
+    }
+    return ["success": true]
   }
 
   func registerProfile(_ request: JSON, connection: HubConnection) throws -> JSON {

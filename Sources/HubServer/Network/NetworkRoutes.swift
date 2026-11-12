@@ -17,6 +17,7 @@ let networkAPINames: [(String, String)] = [
   ("network/gateway/diagnostics", "Hub Network: View Status"),
   ("hub/net/apple-agent/bind", "Hub Network: Bind Apple Local Agent"), ("hub/net/apple-agent/renew", "Hub Network: Renew Apple Local Agent"),
   ("hub/net/apple-agent/unbind", "Hub Network: Unbind Apple Local Agent"),
+  ("hub/net/invitations/hold", "Hub Network: Hold Invitations"),
 ]
 
 /// `hub-net-node.json`: the node agents use, `null` (the default node) until an owner sets one.
@@ -91,6 +92,9 @@ extension Hub {
       }
       .post("hub/net/apple-agent/unbind") { [unowned self] call in
         ["success": true, "status": try network.unbindAppleAgent(call.body, connection: connection(call.peer))]
+      }
+      .post("hub/net/invitations/hold") { [unowned self] call in
+        try network.holdInvitation(call.body, connection: connection(call.peer))
       }
       .post("network/connection/grant") { [unowned self] call in
         ["grant": try network.connectionGrant(call.body, connection: connection(call.peer))]
@@ -192,6 +196,7 @@ extension Hub {
     network.onBindApprove = { [unowned self] connection in
       approveConnection(connection)
     }
+    network.isDenied = { [unowned self] id in registry.device(id)?.denied != nil }
     network.deviceLabel = { [unowned self] id in registry.device(id)?.name }
     network.serviceDevice = { [unowned self] key in registry.services[key]?.device }
     network.deviceSSHPort = { [unowned self] id in

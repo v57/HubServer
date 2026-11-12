@@ -19,8 +19,8 @@ private let publicBuiltins: Set<String> = [
 ]
 // `hub/net/bind` keeps the proof of its bind kind, `hub/net/node` tells agents where their node is, `hub/pair`
 // takes any keyed caller (section 12), `hub/profile/update` labels the caller's own connection,
-// `hub/device/request` answers for its own certificate
-private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check", "hub/profile/update", "hub/device/request", "hub/device/attach/ask"]
+// `hub/device/request` answers for its own certificate, `hub/net/invitations/hold` checks for an owner or an agent
+private let authBuiltins: Set<String> = ["hub/api/services", "hub/net/bind", "hub/net/node", "hub/pair", "hub/grant/check", "hub/profile/update", "hub/device/request", "hub/device/attach/ask", "hub/net/invitations/hold"]
 private let reporterBuiltins: Set<String> = ["hub/device/describe", "hub/device/data"]
 // The attach paths check their caller themselves: an owner, or the parent on its own connection
 private let grantBuiltins: Set<String> = ["hub/devices", "hub/devices/data", "hub/device/attach", "hub/device/attach/requests", "hub/device/attach/dismiss", "hub/device/detach"]

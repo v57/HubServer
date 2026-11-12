@@ -198,6 +198,9 @@ final class NetworkRegistry {
   var released: [(addresses: [String], at: String)] = []
   /// WireGuard keys of removed and revoked devices, for `network/devices/revoked`
   private(set) var revokedDevices: [JSON] = []
+  /// Invitations a member asked the hub's machine to make (`hub/net/invitations/hold`), by replay id, each
+  /// `{ by, expiresAt }`: whoever joins with one waits for an owner, though the hub's own agent signed it
+  private(set) var heldInvitations = JSONObject()
   /// Fields hub-server may add, kept as they are
   private var extra = JSONObject()
   let store: JSONStore
@@ -251,6 +254,7 @@ final class NetworkRegistry {
         return (addresses, at)
       }
       revokedDevices = object["revokedDevices"]?.array ?? []
+      heldInvitations = object["heldInvitations"]?.object ?? JSONObject()
       needsWrite = object["schemaVersion"]?.int != NetworkRegistry.schemaVersion
     }
     // A corrupt registry stays empty and read-only: no identity, no new members
@@ -281,6 +285,7 @@ final class NetworkRegistry {
     object["members"] = .object(JSONObject(memberOrder.compactMap { key in members[key].map { (key, $0.json) } }))
     object["released"] = .array(released.map { ["addresses": JSON($0.addresses), "at": .string($0.at)] })
     object["revokedDevices"] = .array(revokedDevices)
+    object["heldInvitations"] = .object(heldInvitations)
     return .object(object)
   }
 
@@ -372,6 +377,34 @@ final class NetworkRegistry {
     revokedDevices.removeAll { $0["device"]?.string == device }
     revokedDevices.append(["device": .string(device), "wireGuardKeys": JSON(wireGuardKeys), "at": .string(isoNow())])
     store.save()
+  }
+
+  /// Most held invitations at once. A full list refuses the next one rather than dropping one, which would let its
+  /// joiner in without an owner.
+  static let maxHeldInvitations = 1024
+
+  /// Holds whoever joins with the invitation of `replayId` for an owner, until it expires
+  func holdInvitation(_ replayId: String, by: JSON, expiresAt: Date, now: Date = Date()) throws {
+    guard !store.corrupt else { throw ChannelFailure("network registry is corrupt") }
+    var kept = JSONObject()
+    for (id, hold) in heldInvitations where NetworkTime.parse(hold["expiresAt"]?.string).map({ $0 > now }) ?? false {
+      kept[id] = hold
+    }
+    guard kept.count < Self.maxHeldInvitations || kept.contains(replayId) else {
+      heldInvitations = kept
+      throw ChannelFailure("too many held invitations")
+    }
+    kept[replayId] = ["by": by, "expiresAt": .string(isoDate(expiresAt))]
+    heldInvitations = kept
+    store.save()
+  }
+
+  /// Who asked for the invitation of `replayId`, while it's held
+  func heldInvitation(_ replayId: String?, now: Date = Date()) -> JSON? {
+    guard let replayId, let hold = heldInvitations[replayId],
+      NetworkTime.parse(hold["expiresAt"]?.string).map({ $0 > now }) ?? false
+    else { return nil }
+    return hold["by"] ?? .null
   }
 
   /// A removed device that enrolled again is no longer refused as a peer

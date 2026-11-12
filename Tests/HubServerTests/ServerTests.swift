@@ -245,6 +245,90 @@ final class ServerTests: XCTestCase {
     for client in [anonymous, provider, ownerClient, strangerClient, refused, ownerAgain] { client.close() }
   }
 
+  /// Hub app H-033: Deny forgot the request, and the device, still connected, asked again at once with a new code
+  func testADeniedDeviceStaysDeniedUntilAnOwnerTakesItBack() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let owner = HubKeyPair(), service = HubKeyPair(), device = HubKeyPair()
+    var configuration = HubServer.Configuration(dataDirectory: directory)
+    configuration.listen = ListenAddress(host: "127.0.0.1", port: 0)
+    configuration.owners = [owner.publicKey]
+    configuration.log = { _ in }
+    let server = HubServer(configuration)
+    let port = try await server.start()
+    let hubKey = try XCTUnwrap(server.status.hubKey)
+    let id = HubCrypto.deviceId(spki: device.publicKey)
+    func asking() async throws -> TestClient {
+      TestClient(port: port, headers: try await auth(service, hubKey: hubKey, port: port)
+        .merging(["device": certificate(device: device, service: service, instance: "test")]) { $1 })
+    }
+    func status(_ client: TestClient) async throws -> JSON? {
+      // The first answer may still be "waiting" for its turn
+      for _ in 0..<20 {
+        let request = try await client.values("hub/device/request").first
+        if request?["status"] != "waiting" { return request }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      return nil
+    }
+    let ownerClient = TestClient(port: port, headers: try await auth(owner, hubKey: hubKey, port: port))
+    var client = try await asking()
+    let asked = try await status(client)
+    XCTAssertEqual(asked?["status"], "pending")
+    let value = try XCTUnwrap(asked?["codeValue"]?.string)
+
+    _ = try await ownerClient.post("hub/device/deny", ["id": .string(id)])
+    let denied = try await status(client)
+    XCTAssertEqual(denied?["status"], "denied")
+    XCTAssertNil(denied?["codeValue"], "a denied device has no code to show")
+    let value1 = try await ownerClient.values("hub/devices/pending").first?.array?.count
+    XCTAssertEqual(value1, 0)
+    let listed = try await ownerClient.values("hub/devices").first?.array?.first { $0["id"]?.string == id }
+    XCTAssertEqual(listed?["denied"], true)
+    XCTAssertEqual(listed?["approved"], false)
+
+    // Asking again, also on a new connection, makes no new request
+    client.close()
+    client = try await asking()
+    let value2 = try await status(client)?["status"]
+    XCTAssertEqual(value2, "denied")
+    let value3 = try await ownerClient.values("hub/devices/pending").first?.array?.count
+    XCTAssertEqual(value3, 0)
+    // Only an owner denies, and an approved device can't be denied
+    do {
+      _ = try await client.post("hub/device/deny", ["id": .string(id)])
+      XCTFail("a device denied itself")
+    } catch {
+      XCTAssertEqual((error as? ChannelFailure)?.message, "permissions required")
+    }
+
+    // Removing it lets it ask again, with a new code
+    _ = try await ownerClient.post("hub/device/remove", ["id": .string(id)])
+    client.close()
+    client = try await asking()
+    let again = try await status(client)
+    XCTAssertEqual(again?["status"], "pending")
+    XCTAssertNotEqual(again?["codeValue"]?.string, value)
+
+    // Denied again, an owner can still approve it deliberately
+    _ = try await ownerClient.post("hub/device/deny", ["id": .string(id)])
+    let value4 = try await status(client)?["status"]
+    XCTAssertEqual(value4, "denied")
+    _ = try await ownerClient.post("hub/device/approve", ["id": .string(id)])
+    let value5 = try await status(client)?["status"]
+    XCTAssertEqual(value5, "approved")
+    let approved = try await ownerClient.values("hub/devices").first?.array?.first { $0["id"]?.string == id }
+    XCTAssertNil(approved?["denied"])
+    do {
+      _ = try await ownerClient.post("hub/device/deny", ["id": .string(id)])
+      XCTFail("denied an approved device")
+    } catch {
+      XCTAssertEqual((error as? ChannelFailure)?.message, "device approved")
+    }
+    client.close()
+    ownerClient.close()
+    await server.stop()
+  }
+
   func testPairingThroughTheServer() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     var configuration = HubServer.Configuration(dataDirectory: directory)

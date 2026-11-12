@@ -197,6 +197,8 @@ final class Hub: @unchecked Sendable {
       gate.ask(requestSource(connection.remoteAddress), WaitingRequest(certificate: certificate, connection: connection))
     }
     guard let device = registry.device(id) else { return ["id": .string(id), "status": "waiting"] }
+    // A denied device hears so, with no code to compare
+    if device.denied != nil { return ["id": .string(id), "status": "denied"] }
     var object: JSONObject = ["id": .string(id), "status": device.approved ? "approved" : "pending", "name": .string(device.name),
       "codeValue": .string(registry.codeValue(id))]
     if let attached = device.attached { object["attachedTo"] = .string(attached.parent) }
@@ -533,6 +535,7 @@ final class Hub: @unchecked Sendable {
     if let parent = device.parent { object["parent"] = .string(parent) }
     object["approved"] = .bool(device.approved)
     object["revoked"] = .bool(device.revoked != nil)
+    if device.denied != nil { object["denied"] = true }
     object["online"] = .bool(!attached.isEmpty || id == selfId)
     if let state = network.deviceNetworkState(id) { object["network"] = .string(state) }
     if let overlay = network.deviceOverlay(id) { object["overlay"] = overlay }
@@ -1080,6 +1083,13 @@ final class Hub: @unchecked Sendable {
       }
       .stream("hub/devices/pending") { [unowned self] call in try stream(call, .pending) { [unowned self] in registry.pending } }
       .post("hub/device/approve") { [unowned self] call in try approve(call.body?["id"]?.string) }
+      .post("hub/device/deny") { [unowned self] call in
+        // Its connections stay, as plain keys that hear "denied", so it doesn't come back as a new request
+        let id = call.body?["id"]?.string
+        try registry.deny(id)
+        gate.forget { $0.deviceId == id }
+        return nil
+      }
       .post("hub/device/rename") { [unowned self] call in
         let id = call.body?["id"]?.string
         try registry.rename(id, call.body?["name"])

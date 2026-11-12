@@ -121,6 +121,8 @@ struct StoredDevice {
   var createdAt: String
   var lastSeen: String
   var revoked: String?
+  /// An owner denied its request: it stays off the pending list and is told so, until an owner approves or forgets it
+  var denied: String?
   var capabilities: JSON?
   var attached: DeviceAttachment?
   var attachAsk: AttachAsk?
@@ -150,6 +152,7 @@ struct StoredDevice {
     createdAt = json["createdAt"]?.string ?? isoNow()
     lastSeen = json["lastSeen"]?.string ?? createdAt
     revoked = json["revoked"]?.string
+    denied = json["denied"]?.string
     capabilities = json["capabilities"]?.object.map { .object($0) }
     attached = DeviceAttachment(json["attached"])
     if let at = json["attachAsk"]?["at"]?.string { attachAsk = AttachAsk(at: at, parent: json["attachAsk"]?["parent"]?.string) }
@@ -168,6 +171,7 @@ struct StoredDevice {
     object["createdAt"] = .string(createdAt)
     object["lastSeen"] = .string(lastSeen)
     object["revoked"] = JSON(revoked)
+    if let denied { object["denied"] = .string(denied) }
     if let capabilities { object["capabilities"] = capabilities }
     if let attached { object["attached"] = attached.json }
     if let attachAsk { object["attachAsk"] = attachAsk.json }
@@ -312,6 +316,7 @@ final class DeviceRegistry {
   private func settle(_ id: String) {
     guard let device = devices[id], !device.approved else { return }
     devices[id]!.approved = true
+    devices[id]!.denied = nil
     if device.nameByOwner {
       try? claim(id, device.name)
     } else {
@@ -370,7 +375,7 @@ final class DeviceRegistry {
 
   /// A device with a certificate asks to attach. Ignored once attached or turned down.
   func askAttach(_ id: String, parent: String?) {
-    guard let device = devices[id], device.revoked == nil, device.attached == nil, !device.attachDismissed else { return }
+    guard let device = devices[id], device.revoked == nil, device.denied == nil, device.attached == nil, !device.attachDismissed else { return }
     if let ask = device.attachAsk, ask.parent == parent { return }
     devices[id]!.attachAsk = AttachAsk(at: isoNow(), parent: parent)
     save()
@@ -384,7 +389,7 @@ final class DeviceRegistry {
   }
   /// What's asked of the hub right now, oldest first
   func attachRequests(forParent parent: String?) -> JSON {
-    let ids = order.filter { devices[$0]?.attachAsk != nil && devices[$0]?.attached == nil && devices[$0]?.revoked == nil }
+    let ids = order.filter { devices[$0]?.attachAsk != nil && devices[$0]?.attached == nil && devices[$0]?.revoked == nil && devices[$0]?.denied == nil }
       .sorted { devices[$0]!.attachAsk!.at < devices[$1]!.attachAsk!.at }
     return .array(ids.compactMap { id -> JSON? in
       let device = devices[id]!
@@ -486,6 +491,19 @@ final class DeviceRegistry {
     return devices[id!]!
   }
 
+  /// Turns a pending request down for good: it leaves the pending list and keeps its row, so the same device asking
+  /// again is told it was denied instead of making a new request. Approving it, or removing it to let it ask again,
+  /// undoes this.
+  func deny(_ id: String?) throws {
+    let device = try require(id)
+    if device.revoked != nil { throw ChannelFailure("device revoked") }
+    if device.approved { throw ChannelFailure("device approved") }
+    guard device.denied == nil else { return }
+    devices[id!]!.denied = isoNow()
+    devices[id!]!.attachAsk = nil
+    save()
+  }
+
   func rename(_ id: String?, _ name: JSON?) throws {
     guard let name = name?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty, name.utf8.count <= 64 else {
       throw ChannelFailure("invalid name")
@@ -549,7 +567,7 @@ final class DeviceRegistry {
 
   var pending: JSON {
     .array(order.compactMap { id in
-      guard let device = devices[id], !device.approved, device.revoked == nil else { return nil }
+      guard let device = devices[id], !device.approved, device.revoked == nil, device.denied == nil else { return nil }
       var object: JSONObject = ["id": .string(id), "key": .string(device.key), "name": .string(device.name)]
       if let platform = device.platform { object["platform"] = .string(platform) }
       if let parent = device.parent { object["parent"] = .string(parent) }
@@ -571,7 +589,7 @@ final class DeviceRegistry {
 
   /// The ids of pending requests, oldest first
   func pendingIds() -> [String] {
-    order.filter { devices[$0]?.approved == false && devices[$0]?.revoked == nil }.sorted { devices[$0]!.createdAt < devices[$1]!.createdAt }
+    order.filter { devices[$0]?.approved == false && devices[$0]?.revoked == nil && devices[$0]?.denied == nil }.sorted { devices[$0]!.createdAt < devices[$1]!.createdAt }
   }
 
   private func require(_ id: String?) throws -> StoredDevice {

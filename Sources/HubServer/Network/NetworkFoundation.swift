@@ -203,6 +203,8 @@ enum NetworkTime {
   static let gatewayGrantLifetime: TimeInterval = 30 * 24 * 3600
   static let appleReadinessLifetime: TimeInterval = 30
   static let directBootstrapLifetime: TimeInterval = 10 * 60
+  /// The longest an invitation lives (HubService's NetworkInvitationParser.maximumLifetime)
+  static let invitationLifetime: TimeInterval = 8 * 24 * 60 * 60
   static let clockSkew: TimeInterval = 30
 
   /// ISO 8601 as `Date.parse` reads it: any number of fraction digits, `Z` or an offset
